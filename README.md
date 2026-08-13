@@ -36,6 +36,8 @@ ChatESP turns an ESP32 WROOM-32 into a browser-first, direct AI gateway. It host
    pio run -t upload --upload-port /dev/cu.usbserial-0001
    ```
 
+   If `pio` is not on your PATH, use `python3 -m platformio` instead. Replace the upload port with the one your board enumerates as.
+
 4. Open the LAN URL printed after boot, for example `http://192.168.x.x/`.
 
 The ESP32 also starts `ChatESP-Setup` at `http://192.168.4.1/` as a recovery access point. It uses the same password as `WIFI_PASSWORD`, so use at least an eight-character Wi-Fi password.
