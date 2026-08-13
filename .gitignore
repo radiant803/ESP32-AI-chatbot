@@ -1,22 +1,4 @@
-# Build and IDE
 .pio/
 .vscode/
-.idea/
-*.swp
-*.swo
-
-# Secrets and credentials
 src/secrets.h
-*.env
-*.env.local
 
-# OS files
-.DS_Store
-Thumbs.db
-
-# Build artifacts
-build/
-dist/
-*.o
-*.a
-*.so
