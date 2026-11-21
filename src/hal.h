@@ -41,7 +41,7 @@ inline void releaseRequestBody(HttpServer& server) { server.releaseBody(); }
 constexpr const char* CE_CHIP = "ESP8266";
 constexpr size_t CE_BODY_LIMIT = 6000;
 constexpr size_t CE_FETCH_LIMIT = 16000;
-constexpr uint32_t CE_MIN_HEAP_FOR_TLS = 28000;
+constexpr uint32_t CE_MIN_HEAP_FOR_TLS = 30000;
 #else
 #error "ChatESP supports ESP32 and ESP8266 only"
 #endif

@@ -127,14 +127,14 @@ bool readLine(WiFiClient& client, String& line, uint32_t timeoutMs, const std::f
   return false;
 }
 
-std::unique_ptr<WiFiClient> makeClient(bool tls, const String& host, uint16_t port) {
+std::unique_ptr<WiFiClient> makeClient(bool tls, const String& host, uint16_t port, uint16_t rxBytes = 16709) {
   if (!tls) return std::unique_ptr<WiFiClient>(new WiFiClient());
   std::unique_ptr<WiFiClientSecure> secure(new WiFiClientSecure());
   secure->setInsecure();
 #if defined(ESP8266)
   // BearSSL fails the connection (error 6) when a TLS record is larger than the receive buffer, and cloud APIs send
   // records up to 16 KB (a full record needs 16384 plus 325 bytes of overhead). Use the full size when memory allows; the transmit side only ever sends small requests.
-  secure->setBufferSizes(16709, 512);  // 16709 = BR_SSL_BUFSIZE_INPUT: room for a maximum-size record plus its header and MAC
+  secure->setBufferSizes(rxBytes, 512);  // 16709 = BR_SSL_BUFSIZE_INPUT: room for a maximum-size record plus its header and MAC
 #endif
   return std::unique_ptr<WiFiClient>(secure.release());
 }
@@ -144,15 +144,24 @@ String tlsError(Upstream& up);
 // Opens the upstream connection and reads the response headers. On failure returns false and fills code/message.
 bool upstreamOpen(Upstream& up, const Target& target, const char* method, const String& path, const String& body,
                   const String& extraHeaders, String& code, String& message, uint32_t headerTimeout = HEADER_TIMEOUT_MS,
-                  const std::function<void()>& afterSend = nullptr, const char* bodyFile = nullptr, const std::function<bool()>& abortWait = nullptr) {
+                  const std::function<void()>& afterSend = nullptr, const char* bodyFile = nullptr, const std::function<bool()>& abortWait = nullptr, uint16_t rxBytes = 16709) {
   if (WiFi.status() != WL_CONNECTED) {
     code = "network_unreachable";
     message = "The device is not connected to Wi-Fi.";
     return false;
   }
 #if defined(ESP8266)
-  // BearSSL allocates one contiguous receive buffer; fragmentation can leave plenty of heap but no big enough block.
-  const bool tooLittle = target.tls && (halFreeHeap() < CE_MIN_HEAP_FOR_TLS || ESP.getMaxFreeBlockSize() < 17500);
+  // A BearSSL session needs about 23 KB in one block (context plus the 16.7 KB receive buffer; measured: connects fail at a 22.1 KB block
+  // and succeed from 22.9 KB). Fragmentation after the previous call clears within seconds, so wait for it rather than fail the request.
+  const uint32_t needBlock = rxBytes + 6800, needHeap = rxBytes + 13300;  // 16709 -> 23.5 KB block / 30 KB heap
+  auto memoryShort = [&]() { return halFreeHeap() < needHeap || ESP.getMaxFreeBlockSize() < needBlock; };
+  if (target.tls) {
+    for (uint32_t waited = 0; waited < 9000 && memoryShort(); waited += 250) {
+      delay(250);
+      if (abortWait && abortWait()) break;
+    }
+  }
+  const bool tooLittle = target.tls && memoryShort();
 #else
   const bool tooLittle = target.tls && halFreeHeap() < CE_MIN_HEAP_FOR_TLS;
 #endif
@@ -160,10 +169,16 @@ bool upstreamOpen(Upstream& up, const Target& target, const char* method, const 
     code = "low_memory";
     message = "The device is low on memory (" + String(halFreeHeap() / 1024) + " KB free). Retry in a moment.";
 #if defined(ESP8266)
-    Serial.printf("[proxy] low_memory heap=%u maxblock=%u\n", (unsigned)halFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize());
+    Serial.printf("[proxy] low_memory heap=%u maxblock=%u (waited)\n", (unsigned)halFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize());
 #endif
     return false;
   }
+  const uint32_t heapBefore = halFreeHeap();
+#if defined(ESP8266)
+  const uint32_t blockBefore = ESP.getMaxFreeBlockSize();
+#else
+  const uint32_t blockBefore = 0;
+#endif
   // Resolve first so a DNS failure is reported as one (and cached for the connect below), then connect; one retry covers a transient failure.
   bool connected = false;
   for (int attempt = 0; attempt < 2 && !connected; ++attempt) {
@@ -175,7 +190,7 @@ bool upstreamOpen(Upstream& up, const Target& target, const char* method, const 
       delay(400);
       continue;
     }
-    up.client = makeClient(target.tls, target.host, target.port);
+    up.client = makeClient(target.tls, target.host, target.port, rxBytes);
     up.tls = target.tls;
 #if defined(ESP8266)
     up.client->setTimeout(CONNECT_TIMEOUT_MS);
@@ -185,7 +200,7 @@ bool upstreamOpen(Upstream& up, const Target& target, const char* method, const 
 #endif
     if (!connected) {
       const String why = target.tls ? tlsError(up) : String("tcp");
-      Serial.printf("[proxy] connect failed host=%s attempt=%d heap=%u block=%u err=%s\n", target.host.c_str(), attempt + 1, (unsigned)halFreeHeap(),
+      Serial.printf("[proxy] connect failed host=%s attempt=%d before=%u/%u heap=%u block=%u err=%s\n", target.host.c_str(), attempt + 1, (unsigned)heapBefore, (unsigned)blockBefore, (unsigned)halFreeHeap(),
 #if defined(ESP8266)
                     (unsigned)ESP.getMaxFreeBlockSize(),
 #else
@@ -200,6 +215,9 @@ bool upstreamOpen(Upstream& up, const Target& target, const char* method, const 
     }
   }
   if (!connected) return false;
+#if defined(ESP8266)
+  Serial.printf("[proxy] open %s before=%u/%u after=%u\n", target.host.c_str(), (unsigned)heapBefore, (unsigned)blockBefore, (unsigned)halFreeHeap());
+#endif
   // On the ESP8266 a large request body is parked in flash so it need not sit in RAM while the TLS buffers are allocated.
   File spill;
   size_t bodyLen = body.length();
@@ -406,6 +424,9 @@ void handleProxy(HttpServer& server) {
   // A non-streamed reply sends nothing until the model has finished, so the browser may ask for a longer wait (seconds, max 10 minutes).
   const long askedWait = server.header("X-CE-Timeout").toInt();
   const uint32_t headerWait = askedWait > 0 ? static_cast<uint32_t>(min<long>(askedWait, 600)) * 1000UL : HEADER_TIMEOUT_MS;
+  // The app may ask for a smaller TLS receive buffer for short, buffered replies (frees ~8 KB of heap on the ESP8266).
+  const long askedRx = server.header("X-CE-Rx").toInt();
+  const uint16_t rxBytes = askedRx >= 4096 && askedRx < 16709 ? static_cast<uint16_t>(askedRx) : 16709;
   const char* upstreamMethod = method == "GET" ? "GET" : "POST";
   const char* spillPath = nullptr;
 #if defined(ESP8266)
@@ -426,7 +447,7 @@ void handleProxy(HttpServer& server) {
   }
 #endif
   Upstream up;
-  const bool opened = upstreamOpen(up, target, upstreamMethod, path, method == "GET" || spillPath ? String() : body, "", code, message, headerWait, [&server]() { releaseRequestBody(server); }, spillPath, [&server]() { return !server.client().connected(); });
+  const bool opened = upstreamOpen(up, target, upstreamMethod, path, method == "GET" || spillPath ? String() : body, "", code, message, headerWait, [&server]() { releaseRequestBody(server); }, spillPath, [&server]() { return !server.client().connected(); }, rxBytes);
 #if defined(ESP8266)
   if (spillPath) LittleFS.remove(spillPath);
 #endif

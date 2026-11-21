@@ -69,7 +69,7 @@ You may use up to ${this.MAX_STEPS} steps; use them to verify facts, fix mistake
       for (let n = 1; n <= this.MAX_STEPS; n++) {
         const think = addStep(chat, node, `Step ${n}: thinking`);
         const stepEffort = chat.effortTouched || n === 1 ? undefined : (cfg.effort === "high" ? "medium" : undefined);  // deep thinking for the plan; tool-choice steps need less
-        const req = fitToLimit(chat.provider, baseRequest(chat, this.system(context), { messages: work.slice(), maxTokens: cfg.tokens, ...(stepEffort ? { effort: stepEffort } : {}) }), { pinFirst: true });
+        const req = fitToLimit(chat.provider, baseRequest(chat, this.system(context), { messages: work.slice(), maxTokens: cfg.tokens, smallRecords: Dev.smallDevice(), ...(stepEffort ? { effort: stepEffort } : {}) }), { pinFirst: true });
         const raw = await completeLive(chat, node, req, sig, think);
         let act; try { act = extractJson(raw); } catch (_) { endStep(chat, node, think, "done", "Answered directly"); node.text = raw; return; }
         const name = String(act.action || "final"), args = act.args || act;  // some models put the arguments at the top level

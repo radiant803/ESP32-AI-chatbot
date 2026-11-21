@@ -353,10 +353,10 @@ void handleNotFound() {
 void registerApiRoutes(HttpServer& server) {
   api = &server;
 #if defined(ESP32)
-  const char* headers[] = {"X-CE-Provider", "X-CE-Path", "X-CE-Method", "X-CE-Timeout"};
-  server.collectHeaders(headers, 4);
+  const char* headers[] = {"X-CE-Provider", "X-CE-Path", "X-CE-Method", "X-CE-Timeout", "X-CE-Rx"};
+  server.collectHeaders(headers, 5);
 #else
-  server.collectHeaders("X-CE-Provider", "X-CE-Path", "X-CE-Method", "X-CE-Timeout");
+  server.collectHeaders("X-CE-Provider", "X-CE-Path", "X-CE-Method", "X-CE-Timeout", "X-CE-Rx");
 #endif
   server.on("/api/health", HTTP_GET, handleBootstrap);
   server.on("/api/bootstrap", HTTP_GET, handleBootstrap);

@@ -332,6 +332,8 @@ function buildRequest(provider, req) {
 async function streamChat(provider, req, cb = {}, signal) {
   try { return await Dev.serial(() => streamChatNow(provider, req, cb, signal)); }
   catch (e) {
+    // A small TLS receive buffer was requested and the reply did not arrive intact: retry once with the full-size buffer.
+    if (e && req.smallRecords && (e.code === "response_incomplete" || e.code === "stream_interrupted" || e.code === "network_unreachable")) return streamChat(provider, { ...req, smallRecords: false }, cb, signal);
     // The model used its entire output budget on reasoning and wrote nothing: try once more with lighter reasoning and more room.
     if (e && e.code === "provider_empty_response" && !req.__lowered) {
       const rz = reasoningFor(provider, req.model, req.effort, req.think, req.quiet), i = rz && rz.on && !rz.quiet ? rz.spec.levels.indexOf(rz.level) : -1;
@@ -347,7 +349,7 @@ async function streamChatNow(provider, req, cb = {}, signal) {
   applyQuirks(provider, req.model, body);
   let res;
   for (let attempt = 0; ; attempt++) {
-    try { res = await Dev.proxy(provider, path, { body, signal, headers: buffered ? { "X-CE-Timeout": "600" } : {} }); break; }
+    try { res = await Dev.proxy(provider, path, { body, signal, headers: buffered ? { "X-CE-Timeout": "600", ...(req.smallRecords ? { "X-CE-Rx": "8192" } : {}) } : {} }); break; }
     catch (e) { if (attempt >= 4 || !adaptToRejection(provider, req.model, body, e)) throw e; }  // the provider refused a parameter: adjust and retry
   }
   let text = "", usage = null; const sources = [];
@@ -406,7 +408,7 @@ async function readStream(provider, req, res, body, cb, signal, sources, report)
 // Reads a whole (non-streamed) reply and hands it to the callbacks in one piece, producing the same result as readStream.
 async function readBuffered(provider, req, res, body, cb, sources) {
   const j = await res.json().catch(() => null);
-  if (!j) throw new ApiError("provider_request_failed", "The provider returned an unreadable reply.", "Retry.", 502);
+  if (!j) throw new ApiError("response_incomplete", "The provider reply arrived incomplete.", "Retry.", 502);
   const addSource = (title, url) => { if (url && !sources.some((s) => s.url === url)) { const s = { title: title || url, url }; sources.push(s); cb.onSource && cb.onSource(s); } };
   let text = "", think = "", usage = null;
   if (provider === "openai") {

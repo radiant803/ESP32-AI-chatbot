@@ -37,7 +37,7 @@ tabs running an old build are told to reload. Research-backed presentations sear
 plainly when a number could not be verified.
 
 ESP8266 notes: a TLS session needs about 17 KB of contiguous heap, so the firmware parks large request bodies in flash before connecting, pauses mDNS
-(`chatesp.local` returns when the board is idle) and refuses a call when memory is short (the app retries). Because per-token streaming events cost several
+(`chatesp.local` returns when the board is idle) and refuses a call when memory is short (the app retries). Agent steps also ask for a smaller TLS receive buffer (about 8 KB freed; it falls back to full size if a reply does not arrive intact), the proxy waits a few seconds for a 23 KB free block before opening a connection, and the board abandons a wait when you press Stop. Because per-token streaming events cost several
 megabytes and leave only a few KB of heap, Agent and Design on this chip fetch long replies in one piece, so the live code preview shows when the reply lands.
 
 Run the checks with `node web/test/markdown.test.cjs`, `node web/test/reasoning.test.cjs`, `node web/test/json.test.cjs` and `node web/test/design.test.cjs`.
