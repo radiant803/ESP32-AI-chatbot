@@ -3,26 +3,25 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
-constexpr size_t MAX_PROVIDER_KEY_BYTES = 512;
-constexpr size_t MAX_OLLAMA_URL_BYTES = 160;
-constexpr size_t MAX_MODEL_ID_BYTES = 128;
+constexpr size_t MAX_CREDENTIAL_BYTES = 512;
+constexpr size_t MAX_URL_BYTES = 160;
 
-bool configStoreBegin();
+bool configBegin();
 
-bool providerConfigured(const String& provider);
-String configuredSecret(const String& provider);
-String configuredOllamaUrl();
+// Raw key/value access (NVS on ESP32, an EEPROM-backed JSON blob on ESP8266; both survive uploadfs).
+String cfgGet(const char* key);
+bool cfgPut(const char* key, const String& value);
+bool cfgDel(const char* key);
 
-bool normalizeProviderSecret(const String& rawValue, String& normalizedValue);
-bool saveProviderSecret(const String& provider, const String& rawValue);
-bool deleteProviderSecret(const String& provider);
-bool saveOllamaUrl(const String& rawValue);
-bool deleteOllamaUrl();
+// Providers: openai, anthropic, google, tavily, brave (API keys); ollama, searxng (LAN URLs).
+bool knownProvider(const String& provider);
+bool providerIsUrl(const String& provider);
+const char* providerLabel(const String& provider);
+String credentialFor(const String& provider);
+bool credentialConfigured(const String& provider);
+bool normalizeCredential(const String& provider, const String& raw, String& out);
+bool saveCredential(const String& provider, const String& raw);
+bool deleteCredential(const String& provider);
 
-bool savePreferences(const String& provider, const String& model,
-                     float temperature);
-void loadPreferences(String& provider, String& model, float& temperature);
-
-bool validModelId(const String& value);
-bool normalizeOllamaUrl(const String& rawValue, String& normalizedValue);
-void writeSafeConfiguration(JsonObject target);
+bool savePreferences(const String& provider, const String& model, float temperature);
+void writeConfiguration(JsonObject target);

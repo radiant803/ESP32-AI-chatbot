@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" data-theme="auto" data-accent="indigo">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>ChatESP</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%236366f1'/%3E%3Cpath d='M9 12h14M9 16h9M9 20h12' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" id="icons"></svg>
+<div id="app" class="app" data-rail="open" data-canvas="closed">
+  <div id="scrim" class="scrim"></div>
+  <aside id="rail" class="rail" aria-label="Navigation"></aside>
+  <main id="main" class="main">
+    <header id="topbar" class="topbar"></header>
+    <div id="view" class="view"></div>
+  </main>
+  <aside id="canvas" class="canvas" aria-label="Canvas"></aside>
+</div>
+<div id="overlay"></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<noscript>ChatESP needs JavaScript.</noscript>
+<script src="app.js" defer></script>
+</body>
+</html>

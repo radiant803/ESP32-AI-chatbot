@@ -1,177 +1,193 @@
 #include "config_store.h"
 
-#include <Preferences.h>
+#include "hal.h"
 
-#include "app_types.h"
+#if defined(ESP32)
+#include <Preferences.h>
+#else
+#include <EEPROM.h>
+#endif
 
 namespace {
 
-Preferences preferences;
-constexpr char NVS_NAMESPACE[] = "chatesp";
+struct ProviderInfo {
+  const char* id;
+  const char* label;
+  const char* slot;  // storage key, at most 15 characters for NVS
+  bool isUrl;
+};
 
-const char* keyForProvider(const String& provider) {
-  if (provider == "openai") return "openai_key";
-  if (provider == "anthropic") return "anthropic_key";
-  if (provider == "google") return "google_key";
+constexpr ProviderInfo PROVIDERS[] = {
+    {"openai", "OpenAI", "openai_key", false},
+    {"anthropic", "Anthropic", "anthropic_key", false},
+    {"google", "Google Gemini", "google_key", false},
+    {"tavily", "Tavily search", "tavily_key", false},
+    {"brave", "Brave Search", "brave_key", false},
+    {"ollama", "Ollama", "ollama_url", true},
+    {"searxng", "SearXNG", "searxng_url", true},
+};
+
+const ProviderInfo* find(const String& id) {
+  for (const ProviderInfo& p : PROVIDERS) {
+    if (id == p.id) return &p;
+  }
   return nullptr;
 }
 
-String hostOnly(const String& url) {
-  String host = url;
-  const int scheme = host.indexOf("://");
-  if (scheme >= 0) host = host.substring(scheme + 3);
-  const int slash = host.indexOf('/');
-  if (slash >= 0) host = host.substring(0, slash);
-  return host.substring(0, 96);
-}
-
 bool printableAscii(const String& value) {
-  for (size_t index = 0; index < value.length(); ++index) {
-    const char character = value[index];
-    if (character < 32 || character > 126) return false;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    if (c < 32 || c > 126) return false;
   }
   return true;
 }
+
+#if defined(ESP32)
+Preferences prefs;
+#else
+constexpr size_t EEPROM_BYTES = 2048;
+JsonDocument eeprom;
+
+// The EEPROM library keeps a RAM copy of the whole sector while open, which the ESP8266 cannot spare during TLS.
+// So the sector is only opened for the moment it is read or written.
+void eepromFlush() {
+  String blob;
+  serializeJson(eeprom, blob);
+  if (blob.length() > EEPROM_BYTES - 8) return;
+  EEPROM.begin(EEPROM_BYTES);
+  EEPROM.write(0, 'C');
+  EEPROM.write(1, 'E');
+  EEPROM.write(2, 1);
+  EEPROM.write(3, blob.length() & 0xFF);
+  EEPROM.write(4, (blob.length() >> 8) & 0xFF);
+  for (size_t i = 0; i < blob.length(); ++i) EEPROM.write(5 + i, blob[i]);
+  EEPROM.commit();
+  EEPROM.end();
+}
+#endif
 
 }  // namespace
 
-bool configStoreBegin() { return preferences.begin(NVS_NAMESPACE, false); }
-
-bool providerConfigured(const String& provider) {
-  if (provider == "ollama") return configuredOllamaUrl().length() > 0;
-  return configuredSecret(provider).length() > 0;
-}
-
-String configuredSecret(const String& provider) {
-  const char* key = keyForProvider(provider);
-  if (key == nullptr) return String();
-  String normalized;
-  normalizeProviderSecret(preferences.getString(key, ""), normalized);
-  return normalized;
-}
-
-String configuredOllamaUrl() { return preferences.getString("ollama_url", ""); }
-
-bool normalizeProviderSecret(const String& rawValue, String& normalizedValue) {
-  normalizedValue = "";
-  normalizedValue.reserve(rawValue.length());
-  for (size_t index = 0; index < rawValue.length(); ++index) {
-    const uint8_t character = static_cast<uint8_t>(rawValue[index]);
-    // Provider API keys are ASCII tokens. Ignore pasted Unicode whitespace,
-    // including U+2028, rather than sending invisible bytes to the provider.
-    if (character >= 33 && character <= 126) normalizedValue += static_cast<char>(character);
+bool configBegin() {
+#if defined(ESP32)
+  return prefs.begin("chatesp", false);
+#else
+  EEPROM.begin(EEPROM_BYTES);
+  if (EEPROM.read(0) == 'C' && EEPROM.read(1) == 'E' && EEPROM.read(2) == 1) {
+    const size_t len = EEPROM.read(3) | (EEPROM.read(4) << 8);
+    if (len > 0 && len <= EEPROM_BYTES - 8) {
+      String blob;
+      blob.reserve(len);
+      for (size_t i = 0; i < len; ++i) blob += static_cast<char>(EEPROM.read(5 + i));
+      deserializeJson(eeprom, blob);
+    }
   }
-  return normalizedValue.length() > 0 && normalizedValue.length() <= MAX_PROVIDER_KEY_BYTES &&
-         printableAscii(normalizedValue);
+  EEPROM.end();
+  return true;
+#endif
 }
 
-bool saveProviderSecret(const String& provider, const String& rawValue) {
-  const char* key = keyForProvider(provider);
-  if (key == nullptr) return false;
+String cfgGet(const char* key) {
+#if defined(ESP32)
+  return prefs.getString(key, "");
+#else
+  return eeprom[key].is<const char*>() ? eeprom[key].as<String>() : String();
+#endif
+}
+
+bool cfgPut(const char* key, const String& value) {
+#if defined(ESP32)
+  return prefs.putString(key, value) == value.length();
+#else
+  eeprom[key] = value;
+  eepromFlush();
+  return true;
+#endif
+}
+
+bool cfgDel(const char* key) {
+#if defined(ESP32)
+  return !prefs.isKey(key) || prefs.remove(key);
+#else
+  eeprom.remove(key);
+  eepromFlush();
+  return true;
+#endif
+}
+
+bool knownProvider(const String& provider) { return find(provider) != nullptr; }
+bool providerIsUrl(const String& provider) {
+  const ProviderInfo* p = find(provider);
+  return p && p->isUrl;
+}
+const char* providerLabel(const String& provider) {
+  const ProviderInfo* p = find(provider);
+  return p ? p->label : "Unknown";
+}
+String credentialFor(const String& provider) {
+  const ProviderInfo* p = find(provider);
+  return p ? cfgGet(p->slot) : String();
+}
+bool credentialConfigured(const String& provider) { return credentialFor(provider).length() > 0; }
+
+bool normalizeCredential(const String& provider, const String& raw, String& out) {
+  const ProviderInfo* p = find(provider);
+  if (!p) return false;
+  out = "";
+  if (p->isUrl) {
+    out = raw;
+    out.trim();
+    if (out.length() < 10 || out.length() > MAX_URL_BYTES || !printableAscii(out)) return false;
+    if (!out.startsWith("http://") && !out.startsWith("https://")) return false;
+    if (out.indexOf('@') >= 0 || out.indexOf('?') >= 0 || out.indexOf('#') >= 0) return false;
+    while (out.endsWith("/")) out.remove(out.length() - 1);
+    const int hostStart = out.indexOf("://") + 3;
+    return out.length() > hostStart && out.indexOf('/', hostStart) < 0 && out.indexOf(' ') < 0;
+  }
+  // API keys are ASCII tokens; drop pasted whitespace, including invisible Unicode separators.
+  out.reserve(raw.length());
+  for (size_t i = 0; i < raw.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(raw[i]);
+    if (c >= 33 && c <= 126) out += static_cast<char>(c);
+  }
+  return out.length() > 0 && out.length() <= MAX_CREDENTIAL_BYTES;
+}
+
+bool saveCredential(const String& provider, const String& raw) {
+  const ProviderInfo* p = find(provider);
   String value;
-  if (!normalizeProviderSecret(rawValue, value)) {
-    return false;
+  return p && normalizeCredential(provider, raw, value) && cfgPut(p->slot, value);
+}
+bool deleteCredential(const String& provider) {
+  const ProviderInfo* p = find(provider);
+  return p && cfgDel(p->slot);
+}
+
+bool savePreferences(const String& provider, const String& model, float temperature) {
+  if ((provider.length() && !knownProvider(provider)) || model.length() > 128 || temperature < 0 || temperature > 2) return false;
+  for (size_t i = 0; i < model.length(); ++i) {
+    const char c = model[i];
+    if (!(isalnum(c) || c == '-' || c == '_' || c == '.' || c == ':' || c == '/')) return false;
   }
-  return preferences.putString(key, value) == value.length();
+  return cfgPut("default_pr", provider) && cfgPut("default_mo", model) && cfgPut("default_tmp", String(temperature, 2));
 }
 
-bool deleteProviderSecret(const String& provider) {
-  const char* key = keyForProvider(provider);
-  return key != nullptr && (!preferences.isKey(key) || preferences.remove(key));
-}
-
-bool normalizeOllamaUrl(const String& rawValue, String& normalizedValue) {
-  normalizedValue = rawValue;
-  normalizedValue.trim();
-  if (normalizedValue.length() < 10 ||
-      normalizedValue.length() > MAX_OLLAMA_URL_BYTES ||
-      (!normalizedValue.startsWith("http://") &&
-       !normalizedValue.startsWith("https://")) ||
-      normalizedValue.indexOf('@') >= 0 || normalizedValue.indexOf('?') >= 0 ||
-      normalizedValue.indexOf('#') >= 0 || !printableAscii(normalizedValue)) {
-    return false;
-  }
-  while (normalizedValue.endsWith("/")) {
-    normalizedValue.remove(normalizedValue.length() - 1);
-  }
-  const int scheme = normalizedValue.indexOf("://");
-  const int firstHostCharacter = scheme + 3;
-  if (scheme < 0 || normalizedValue.length() <= firstHostCharacter ||
-      normalizedValue.indexOf('/', firstHostCharacter) >= 0 ||
-      normalizedValue.indexOf(' ', firstHostCharacter) >= 0) {
-    return false;
-  }
-  return true;
-}
-
-bool saveOllamaUrl(const String& rawValue) {
-  String normalized;
-  if (!normalizeOllamaUrl(rawValue, normalized)) return false;
-  return preferences.putString("ollama_url", normalized) == normalized.length();
-}
-
-bool deleteOllamaUrl() {
-  return !preferences.isKey("ollama_url") || preferences.remove("ollama_url");
-}
-
-bool validModelId(const String& value) {
-  if (!value.length() || value.length() > MAX_MODEL_ID_BYTES) return false;
-  for (size_t index = 0; index < value.length(); ++index) {
-    const char character = value[index];
-    const bool safe = (character >= 'a' && character <= 'z') ||
-                      (character >= 'A' && character <= 'Z') ||
-                      (character >= '0' && character <= '9') ||
-                      character == '-' || character == '_' || character == '.' ||
-                      character == ':';
-    if (!safe) return false;
-  }
-  return true;
-}
-
-bool savePreferences(const String& provider, const String& model,
-                     float temperature) {
-  if (!knownProvider(provider) || (model.length() && !validModelId(model)) ||
-      temperature < 0.0f || temperature > 2.0f) {
-    return false;
-  }
-  const bool providerSaved =
-      preferences.putString("default_pr", provider) == provider.length();
-  const bool modelSaved =
-      preferences.putString("default_mo", model) == model.length();
-  const bool temperatureSaved = preferences.putFloat("default_tmp", temperature) > 0;
-  return providerSaved && modelSaved && temperatureSaved;
-}
-
-void loadPreferences(String& provider, String& model, float& temperature) {
-  provider = preferences.getString("default_pr", "openai");
-  if (!knownProvider(provider)) provider = "openai";
-  model = preferences.getString("default_mo", "");
-  if (model.length() && !validModelId(model)) model = "";
-  temperature = preferences.getFloat("default_tmp", 0.7f);
-  if (temperature < 0.0f || temperature > 2.0f) temperature = 0.7f;
-}
-
-void writeSafeConfiguration(JsonObject target) {
+void writeConfiguration(JsonObject target) {
   JsonObject providers = target["providers"].to<JsonObject>();
-  for (const char* provider : {"openai", "anthropic", "google"}) {
-    JsonObject entry = providers[provider].to<JsonObject>();
-    entry["label"] = providerLabel(provider);
-    entry["configured"] = providerConfigured(provider);
+  for (const ProviderInfo& p : PROVIDERS) {
+    JsonObject entry = providers[p.id].to<JsonObject>();
+    entry["label"] = p.label;
+    const String value = cfgGet(p.slot);
+    entry["configured"] = value.length() > 0;
+    if (p.isUrl && value.length()) {
+      const int scheme = value.indexOf("://");
+      entry["scheme"] = value.substring(0, scheme);
+      entry["host"] = value.substring(scheme + 3);
+    }
   }
-
-  JsonObject ollama = providers["ollama"].to<JsonObject>();
-  ollama["label"] = providerLabel("ollama");
-  ollama["configured"] = providerConfigured("ollama");
-  const String ollamaUrl = configuredOllamaUrl();
-  ollama["host"] = hostOnly(ollamaUrl);
-  ollama["scheme"] = ollamaUrl.startsWith("https://") ? "https" : "http";
-
-  String provider;
-  String model;
-  float temperature = 0.7f;
-  loadPreferences(provider, model, temperature);
-  JsonObject defaults = target["preferences"].to<JsonObject>();
-  defaults["provider"] = provider;
-  defaults["model"] = model;
-  defaults["temperature"] = temperature;
+  JsonObject preferences = target["preferences"].to<JsonObject>();
+  preferences["provider"] = cfgGet("default_pr");
+  preferences["model"] = cfgGet("default_mo");
+  const String temperature = cfgGet("default_tmp");
+  preferences["temperature"] = temperature.length() ? temperature.toFloat() : 0.7f;
 }

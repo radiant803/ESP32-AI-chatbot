@@ -1,85 +1,85 @@
-# ChatESP
+# ChatESP v2
 
-ChatESP turns an ESP32 WROOM-32 into a browser-first, direct AI gateway. It hosts its own responsive web app, stores provider configuration in ESP32 NVS flash, discovers models live, and routes text chat directly to OpenAI, Anthropic, Google Gemini, or a LAN Ollama server.
+A private AI workspace served by a microcontroller. The ESP holds your provider keys and streams requests to
+**OpenAI, Anthropic, Google Gemini or a LAN Ollama server**; everything else (chats, agents, research,
+presentations, files) runs in the browser you open it from. Runs on **ESP32** and **ESP8266 (NodeMCU)**.
 
-## What is included
+## What's new in v2
 
-- Responsive ChatESP web interface with mobile navigation and browser-local conversations.
-- OpenAI, Anthropic, Google Gemini, and Ollama configuration.
-- Live model discovery only; the firmware and UI do not contain a preset model list.
-- Transactional **Test & Save** configuration: a typed key is stored only after the provider returns usable live models.
-- Clear differences between invalid credentials, provider rate limits, a missing model, a timeout, and a network/TLS/DNS failure.
-- Per-chat provider/model/temperature selection, persisted only in the current browser.
-- Bounded Agent mode for text/code, DOCX, PPTX, and XLSX artifacts. The browser composes the file, downloads it, then saves it to LittleFS for later download/delete.
+- A new web app: calm editorial design, light/dark/auto + accents, responsive from 320 px, command palette (`Ctrl/Cmd+K`).
+- ChatGPT-class chat: streaming with Stop, regenerate, edit-and-resend with version pager, copy, read aloud, thumbs, dictation,
+  image and file attachments (images, text, code, PDF), image generation, search, pin/archive/rename, **Projects**,
+  custom instructions, memory, personas, temporary chats, model compare, export, optional PIN screen lock.
+- **Agent mode:** plan, search, read pages, calculate, and create DOCX/XLSX/PPTX/HTML/text/code files, with hard step and time caps.
+- **Presentations:** prompt to outline to an editable deck (8 layouts, 6 themes, charts, images, speaker notes); export PPTX, HTML, PDF.
+- **Research mode:** plans queries, searches, reads sources, writes a cited report; export Markdown/DOCX/PDF; "Go deeper".
+- Device tooling: Wi-Fi provisioning from the browser, OTA firmware upload, mDNS (`chatesp.local`), storage manager.
+- All v1 features kept: four providers, live model discovery only, transactional Test & Save, distinct error classes,
+  keys never returned to the browser, recovery AP, artifact storage, 320 px layout.
 
-## First flash
+## How it works
 
-1. Create the private Wi-Fi file:
+```
+Browser (UI, agents, research, file building) --HTTP--> ESP (key vault + streaming proxy + file store) --TLS--> provider
+```
 
-   ```sh
-   cp src/secrets.h.example src/secrets.h
-   ```
+The firmware no longer maps provider formats. The browser builds each provider's request; the ESP checks the endpoint
+against an allow-list, adds the stored credential, forwards the body and streams the reply back byte for byte. That is why
+streaming, vision, web search and larger outputs now work within a few KB of RAM. The UI is stored gzipped in LittleFS (about 66 KB).
 
-2. Edit only these lines in `src/secrets.h`:
+| Chip | Request limit | Notes |
+| --- | --- | --- |
+| ESP32 | 40 KB per request | Full feature set |
+| ESP8266 | 6 KB per request | Long chats are trimmed; images disabled; HTTPS to cloud providers depends on TLS memory (see below) |
 
-   ```cpp
-   static const char* WIFI_SSID = "YOUR_WIFI_NAME";
-   static const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-   ```
+## Build and flash
 
-   Keep this file private. It is ignored by Git. Provider keys are deliberately not compiled into firmware.
+Needs Node 18+ and PlatformIO (`python3 -m platformio` works too).
 
-3. Build and flash:
+```sh
+node web/build.mjs                      # gzips the web app into data/
+tools/flash.sh esp32dev /dev/cu.usbserial-XXXX
+tools/flash.sh esp8266  /dev/cu.usbserial-YYYY
+```
 
-   ```sh
-   pio run
-   pio run -t upload --upload-port /dev/cu.usbserial-0001
-   ```
+`flash.sh` requires the port explicitly so it never overwrites a board you did not mean to. The ESP32 partition table changed
+(two OTA slots), so the first v2 flash must go over USB; later updates can use Settings -> Device -> Firmware update.
+Saved keys live in NVS (ESP32) or an EEPROM sector (ESP8266) and survive `uploadfs`.
 
-   If `pio` is not on your PATH, use `python3 -m platformio` instead. Replace the upload port with the one your board enumerates as.
+First boot: join **ChatESP-Setup** (password `chatesp-setup`, also printed on serial), open `http://192.168.4.1/`,
+and use Settings -> Device to enter your Wi-Fi. Optionally copy `src/secrets.h.example` to `src/secrets.h` to compile in a first network.
 
-4. Open the LAN URL printed after boot, for example `http://192.168.x.x/`.
+## Developing the UI without hardware
 
-The ESP32 also starts `ChatESP-Setup` at `http://192.168.4.1/` as a recovery access point. It uses the same password as `WIFI_PASSWORD`, so use at least an eight-character Wi-Fi password.
+```sh
+node web/build.mjs --dev && node web/mock-server.mjs 8787    # then open http://localhost:8787
+```
 
-## Configure a provider
+The mock server implements the device API and fakes provider streams for all four formats, including the agent, deck and research prompts.
+Use `--limit=6000` to emulate the ESP8266 request limit.
 
-1. Open **Settings**.
-2. Choose OpenAI, Anthropic, Google Gemini, or Ollama.
-3. Paste a cloud API key, or enter an Ollama LAN URL such as `http://192.168.1.20:11434`.
-4. Select **Test & Save**.
+## Web search
 
-ChatESP makes a live model-list request using the submitted value. It persists a cloud key or Ollama URL in NVS only if that request succeeds and returns usable models. A failed test leaves the previously saved configuration unchanged. The browser only receives a configured/not-configured status; it never receives a stored key.
+Research and Agent use **Wikipedia** or **DuckDuckGo** (via the device's `/api/fetch` relay) by default, which are free and need no key.
+Tavily or Brave keys, or your own SearXNG, are optional upgrades (those services set their own limits and prices). Provider-native
+search (OpenAI/Anthropic/Gemini) is off by default because it can add charges to your provider account.
 
-After a successful test, choose a returned model and use **Save chat defaults** if wanted. The chat header uses the same live model list. Use **Delete stored key** (or URL) to remove configuration from flash.
+## ESP8266 notes
 
-## Agent artifacts
-
-Turn on **Agent** beside the composer and ask for a file. The selected provider makes a bounded JSON plan; the browser validates and composes the requested artifact, downloads it immediately, and uploads it to the ESP32.
-
-- Text and code files work without browser internet access.
-- DOCX, PPTX, and XLSX load pinned open-source browser libraries only when requested, so those formats require browser internet access.
-- Generated code is never run.
-- Each stored artifact is limited to 700 KB. Use **Artifacts** to download or delete it.
-
-## Storage and limits
-
-The included partition table reserves approximately 1.8 MB for firmware and 2.2 MB for LittleFS artifacts. The current firmware uses roughly 1.13 MB of firmware flash and 47 KB of RAM at build time, leaving approximately 703 KB in the application partition. Normal application reflashing preserves NVS configuration and artifacts; erasing the whole flash removes them.
+The NodeMCU build works, but HTTPS to cloud providers needs about 20-30 KB of free heap for TLS and many servers send 16 KB
+records. The firmware probes for a smaller TLS fragment size and falls back to larger buffers; if a provider fails with `low_memory`
+or `network_unreachable`, use Ollama over plain HTTP on your LAN or an ESP32. On a NodeMCU, TLS to OpenAI, Anthropic and Gemini connected (about 32 KB free heap during the handshake); see `docs/superpowers/specs/2026-10-26-chatesp-v2-design.md` for hardware findings. Use a good USB power source and a decent signal: the ESP8266 radio is easily starved.
 
 ## Security notes
 
-This is a LAN-only prototype. Cloud provider TLS certificate validation is disabled to fit the constrained direct-gateway design, and the web app has no user authentication. Keep the ESP32 on a trusted private network, use dedicated scoped API keys, and delete keys/artifacts before giving the device to someone else. Do not expose ChatESP directly to the public internet.
+LAN-only prototype. The device API has no sign-in; cloud TLS certificates are not validated (constrained hardware); the UI PIN is a
+privacy screen, not access control. Use scoped keys, and delete them before giving the device away. Generated code is never run;
+HTML previews are sandboxed. `/api/fetch` refuses private and loopback addresses.
 
 ## Troubleshooting
 
-- **`network_unreachable`**: the ESP32 could not complete DNS/TLS/network access. Confirm station Wi-Fi and retry; do not assume the key is bad.
-- **`authentication_failed`**: the cloud provider rejected the key. Paste a current key and use Test & Save again.
-- **`rate_limited`**: wait briefly and retry.
-- **`model_or_endpoint_not_found`**: refresh live models and select an ID returned by the provider.
-- **Ollama cannot connect**: use the computer's LAN IP and port, not `localhost` or `127.0.0.1`.
-
-For serial output:
-
-```sh
-pio device monitor --port /dev/cu.usbserial-0001 -b 115200
-```
+- **`authentication_failed`**: the provider rejected the key; paste a current one.
+- **`network_unreachable`**: DNS/TLS/Wi-Fi failure; not a bad key.
+- **`low_memory`**: the ESP is busy; retry or shorten the request.
+- **`request_too_large`**: shorten the chat or attach smaller files (limit shown in Settings -> Device).
+- **Ollama can't connect**: use the host's LAN IP and port, not `localhost`.
