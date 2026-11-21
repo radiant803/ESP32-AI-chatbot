@@ -4,6 +4,13 @@ const UI = {
     $("icons").innerHTML = "";
     $("scrim").addEventListener("click", () => this.setRail(false));
     this.applyTheme();
+    setInterval(() => document.querySelectorAll(".think-timer[data-since]").forEach((el) => { const sec = Math.max(0, Math.round((Date.now() - el.dataset.since) / 1000)); el.textContent = sec ? sec + "s" : ""; }), 1000);
+    document.addEventListener("toggle", (e) => {
+      const d = e.target; if (!d.matches || !d.matches("details[data-kind]")) return;
+      const c = curChat(), n = c && c.nodes[d.dataset.id]; if (!n) return;
+      const live = d.dataset.kind === "think" ? n.pending && !n.text : n.pending || (n.steps || []).some((x) => x.state === "run");
+      if (d.dataset.kind === "think") { if (live) n.thinkClosed = !d.open; else n.thinkOpen = d.open; } else { if (live) n.stepsClosed = !d.open; else n.stepsOpen = d.open; }
+    }, true);
     matchMedia("(max-width: 900px)").addEventListener("change", () => this.render());
   },
   applyTheme() {
@@ -72,7 +79,8 @@ const UI = {
     this.renderThread(o); this.syncComposer();
   },
   shellHTML() {
-    return `<div class="thread" id="thread"><div class="thread-inner" id="thread-inner"></div></div>
+    return `<div class="thread" id="thread"><div class="thread-inner" id="thread-inner" role="log" aria-label="Conversation"></div></div>
+      <button class="to-bottom hide" id="to-bottom" data-act="to-bottom" aria-label="Scroll to latest message">${ico("down")}</button>
       <div class="composer-wrap"><div class="composer" id="composer">
         <div class="tray" id="tray"></div>
         <textarea id="prompt" rows="1" placeholder="Message ChatESP" aria-label="Message"></textarea>
@@ -94,13 +102,14 @@ const UI = {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing && (Store.settings.enterToSend || e.metaKey || e.ctrlKey) && !this.mobile()) { e.preventDefault(); ACTS.send(); }
       else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); ACTS.send(); }
     });
+    ta.addEventListener("keydown", (e) => { if (e.key === "ArrowUp" && !ta.value && !e.shiftKey && !isBusy()) { const u = this.visibleNodes(curChat()).filter((n) => n.role === "user").pop(); if (u) { e.preventDefault(); ACTS["edit-msg"]({ dataset: { id: u.id } }); } } });
     ta.addEventListener("paste", (e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); this.addFiles(fs); } });
     $("file-in").addEventListener("change", (e) => { this.addFiles([...e.target.files]); e.target.value = ""; });
     ["dragenter", "dragover"].forEach((t) => v.addEventListener(t, (e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); v.classList.add("dragging"); } }));
     ["dragleave", "drop"].forEach((t) => v.addEventListener(t, (e) => { if (t === "drop" || e.target === v) v.classList.remove("dragging"); }));
     v.addEventListener("drop", (e) => { if (e.dataTransfer?.files?.length) { e.preventDefault(); this.addFiles([...e.dataTransfer.files]); } });
     v.addEventListener("click", (e) => { const s = e.target.closest("[data-suggest]"); if (s) { startSend(s.dataset.suggest); } const st = e.target.closest("[data-starter]"); if (st) { const ta2 = $("prompt"); ta2.value = st.dataset.starter; ta2.focus(); grow(); App.drafts[App.chatId] = ta2.value; } });
-    $("thread").addEventListener("scroll", () => { this.stick = this.nearBottom(); });
+    $("thread").addEventListener("scroll", () => { this.stick = this.nearBottom(); this.updateScrollBtn(); }, { passive: true });
   },
   stick: true,
   nearBottom() { const t = $("thread"); return !t || t.scrollHeight - t.scrollTop - t.clientHeight < 160; },
@@ -152,18 +161,29 @@ const UI = {
     const lastAsst = [...nodes].reverse().find((n) => n.role === "assistant");
     inner.innerHTML = nodes.map((n) => this.msgHTML(chat, n, lastAsst && n.id === lastAsst.id)).join("");
     if (o.scroll) { this.stick = true; this.scrollBottom(true); } else this.scrollBottom();
+    this.updateScrollBtn();
   },
+  // Patches only the parts of a message that changed, so streaming never re-animates, resets scroll, or collapses panels.
   updateNode(chat, node) {
     if (chat.id !== App.chatId) return;
     const el = document.querySelector(`[data-node="${node.id}"]`); if (!el) return;
     const last = this.visibleNodes(chat).filter((n) => n.role === "assistant").pop();
-    const tmp = document.createElement("div"); tmp.innerHTML = this.msgHTML(chat, node, last && last.id === node.id);
-    const open = [...el.querySelectorAll("details[open]")].length > 0;
-    el.replaceWith(tmp.firstElementChild);
-    this.scrollBottom();
+    const tmp = document.createElement("div"); tmp.innerHTML = this.msgHTML(chat, node, last && last.id === node.id, true);
+    const nu = tmp.firstElementChild, cls = nu.className.replace(/\banim\b/g, "").trim();
+    if (el.className.replace(/\banim\b/g, "").trim() !== cls) el.className = cls + (el.classList.contains("anim") ? " anim" : "");
+    el.setAttribute("aria-busy", nu.getAttribute("aria-busy"));
+    for (const part of nu.querySelectorAll("[data-part]")) {
+      const old = el.querySelector(`[data-part="${part.dataset.part}"]`);
+      if (!old) { el.replaceWith(nu); break; }
+      if (old.innerHTML !== part.innerHTML) old.innerHTML = part.innerHTML;
+    }
+    this.scrollBottom(); this.updateScrollBtn();
   },
+  updateScrollBtn() { const b = $("to-bottom"), t = $("thread"); if (b && t) b.classList.toggle("hide", t.scrollHeight - t.scrollTop - t.clientHeight < 220); },
+  announce(text) { const l = $("live"); if (l) { l.textContent = ""; setTimeout(() => (l.textContent = text), 60); } },
   afterTurn(chat, node) {
     this.syncComposer(); this.renderRail();
+    this.announce(node.error ? "The response failed." : node.stopped ? "Response stopped." : "Response ready.");
     if (node.error || node.stopped) return;
     // Best-effort extras, one after the other: a model-written title for a new chat, then follow-up suggestions.
     if (node.mode === "chat" || !node.mode) {
@@ -188,31 +208,38 @@ const UI = {
       ${need ? `<div class="callout" style="width:100%;text-align:left">${ico("key")}<span class="grow">${Dev.configured(chat.provider) ? "Choose a model to start chatting." : "Add a provider key to start chatting."}</span><button class="btn primary sm" data-act="${Dev.configured(chat.provider) ? "pick-model" : "go-settings"}">${Dev.configured(chat.provider) ? "Choose model" : "Add key"}</button></div>` : ""}
       <div class="starters">${S.map((x) => `<button class="starter" data-starter="${esc(x[3])}"><span class="ic">${ico(x[0], "sm")}</span><b>${esc(x[1])}</b><span>${esc(x[2])}</span></button>`).join("")}</div></div>`;
   },
-  msgHTML(chat, n, isLast) {
-    const sibs = siblingsOf(chat, n), idx = sibs.indexOf(n.id);
+  msgHTML(chat, n, isLast, update = false) {
+    const sibs = siblingsOf(chat, n), idx = sibs.indexOf(n.id), anim = !update && Date.now() - n.ts < 1500 ? " anim" : "";
     const pager = sibs.length > 1 ? `<span class="pager"><button class="tool-btn" data-act="sib" data-id="${n.id}" data-d="-1" ${idx === 0 ? "disabled" : ""} aria-label="Previous version">${ico("chevl", "sm")}</button>${idx + 1}/${sibs.length}<button class="tool-btn" data-act="sib" data-id="${n.id}" data-d="1" ${idx === sibs.length - 1 ? "disabled" : ""} aria-label="Next version">${ico("chev", "sm")}</button></span>` : "";
     if (n.role === "user") {
       const atts = (n.atts || []).length ? `<div class="attach-row">${n.atts.map((a) => `<span class="attach">${a.kind === "image" ? `<img alt="" src="${a.data}">` : ico("file")}<span class="truncate">${esc(a.name)}</span></span>`).join("")}</div>` : "";
-      return `<div class="msg user ${isLast ? "last" : ""}" data-node="${n.id}">${atts}${n.text ? `<div class="body">${esc(n.text)}</div>` : ""}<div class="tools">${pager}<button class="tool-btn" data-act="copy-msg" data-id="${n.id}" aria-label="Copy" title="Copy">${ico("copy", "sm")}</button><button class="tool-btn" data-act="edit-msg" data-id="${n.id}" aria-label="Edit" title="Edit and resend">${ico("edit", "sm")}</button><button class="tool-btn" data-act="remember" data-id="${n.id}" aria-label="Remember" title="Remember this">${ico("brain", "sm")}</button></div></div>`;
+      return `<div class="msg user ${isLast ? "last" : ""}${anim}" data-node="${n.id}">${atts}${n.text ? `<div class="body">${esc(n.text)}</div>` : ""}<div class="tools" title="${esc(fmtDate(n.ts))}">${pager}<button class="tool-btn" data-act="copy-msg" data-id="${n.id}" aria-label="Copy" title="Copy">${ico("copy", "sm")}</button><button class="tool-btn" data-act="edit-msg" data-id="${n.id}" aria-label="Edit" title="Edit and resend">${ico("edit", "sm")}</button><button class="tool-btn" data-act="remember" data-id="${n.id}" aria-label="Remember" title="Remember this">${ico("brain", "sm")}</button></div></div>`;
     }
-    const mode = n.mode || "chat", sources = n.sources || [];
-    const cite = mode === "research" || sources.length ? sources : null;
+    const mode = n.mode || "chat", sources = n.sources || [], cite = mode === "research" || sources.length ? sources : null;
+    const waiting = n.pending && !n.text, secs = (ms) => (ms >= 1000 ? Math.round(ms / 1000) + "s" : "under 1s");
     let steps = "";
     if ((n.steps || []).length) {
-      const running = n.steps.some((s) => s.state === "run");
-      steps = `<details class="steps" ${n.pending || running ? "open" : ""}><summary>${n.pending ? ico("loader", "sm") : ico("check", "sm")}<span class="grow">${n.pending ? "Working…" : `${n.steps.length} steps`}</span>${ico("chevd", "sm")}</summary>${n.steps.map((s) => `<div class="step ${s.state}"><span class="si">${ico(s.state === "err" ? "x" : s.state === "run" ? "loader" : "check", "sm")}</span><div class="grow"><div>${esc(s.label)}</div>${s.detail ? `<div class="sd">${esc(s.detail)}</div>` : ""}</div></div>`).join("")}</details>`;
+      const running = n.steps.some((s) => s.state === "run"), live = n.pending || running;
+      steps = `<details class="steps" data-kind="steps" data-id="${n.id}" ${live ? (n.stepsClosed ? "" : "open") : n.stepsOpen ? "open" : ""}><summary>${n.pending ? ico("loader", "sm") : ico("check", "sm")}<span class="grow">${n.pending ? "Working…" : `${n.steps.length} steps`}</span>${ico("chevd", "sm")}</summary>${n.steps.map((s) => `<div class="step ${s.state}"><span class="si">${ico(s.state === "err" ? "x" : s.state === "run" ? "loader" : "check", "sm")}</span><div class="grow"><div>${esc(s.label)}</div>${s.detail ? `<div class="sd">${esc(s.detail)}</div>` : ""}</div></div>`).join("")}</details>`;
     }
-    const think = n.think ? `<details class="steps"><summary>${ico("brain", "sm")}<span class="grow">Reasoning summary</span>${ico("chevd", "sm")}</summary><div class="step"><div class="sd" style="white-space:pre-wrap">${esc(n.think)}</div></div></details>` : "";
-    const body = n.text ? `<div class="md ${n.pending ? "caret" : ""}">${renderMarkdown(n.text, cite)}</div>` : n.pending && !(n.steps || []).length ? `<div class="thinking" aria-label="Thinking"><i></i><i></i><i></i></div>` : "";
-    const err = n.error ? `<div class="err-card"><b>${esc(n.error.message)}</b><span>${esc(n.error.hint)}</span><div style="margin-top:8px"><button class="btn sm" data-act="regen" data-id="${n.id}">${ico("refresh", "sm")}Retry</button></div></div>` : "";
+    let think = "";
+    if (n.think) {
+      const live = waiting, label = live ? `<span class="shimmer">Thinking</span> <span class="think-timer" data-since="${n.thinkStart || n.ts}"></span>` : n.thinkMs ? `Thought for ${secs(n.thinkMs)}` : "Reasoning summary";
+      think = `<details class="steps think" data-kind="think" data-id="${n.id}" ${live ? (n.thinkClosed ? "" : "open") : n.thinkOpen ? "open" : ""}><summary>${ico("brain", "sm")}<span class="grow">${label}</span>${ico("chevd", "sm")}</summary><div class="think-body md">${renderMarkdown(n.think)}</div></details>`;
+    }
+    let body = "";
+    if (n.text) body = `<div class="md ${n.pending ? "caret" : ""}">${renderMarkdown(n.text, cite)}</div>`;
+    else if (waiting && !(n.steps || []).length && !n.think && !n.genPending) body = n.rz && n.rz !== "off" ? `<div class="thinking-line" role="status"><span class="shimmer">Thinking</span> <span class="think-timer" data-since="${n.ts}"></span></div>` : `<div class="thinking" role="status" aria-label="Thinking"><i></i><i></i><i></i></div>`;
+    const err = n.error ? `<div class="err-card" role="alert"><b>${esc(n.error.message)}</b><span>${esc(n.error.hint)}</span><div style="margin-top:8px"><button class="btn sm" data-act="regen" data-id="${n.id}">${ico("refresh", "sm")}Retry</button></div></div>` : "";
+    const gen = n.genPending ? `<div class="gen-skel" role="status"><div class="shimmer-box"></div><span>Creating image…</span></div>` : (n.gen || []).map((src, i) => `<figure class="gen"><img src="${src}" alt="Generated image" loading="lazy" data-act="open-image" data-id="${n.id}" data-i="${i}"><figcaption><button class="tool-btn" data-act="open-image" data-id="${n.id}" data-i="${i}" aria-label="Open image">${ico("eye", "sm")}</button><button class="tool-btn" data-act="dl-image" data-id="${n.id}" data-i="${i}" aria-label="Download image">${ico("download", "sm")}</button></figcaption></figure>`).join("");
     const arts = (n.artifacts || []).map((a, i) => `<button class="artifact-card" data-act="open-artifact" data-id="${n.id}" data-i="${i}">${fileIcon(a.name)}<div class="grow"><div class="truncate" style="font-weight:600">${esc(a.name)}</div><div class="muted" style="font-size:12.5px">${fmtBytes(a.size)} · ${a.stored ? "Stored on device" : "Downloaded only"}</div></div>${ico("arrowr", "sm")}</button>`).join("");
     const deck = n.deck ? `<button class="artifact-card" data-act="open-deck" data-id="${n.id}"><span class="file-ico pptx">DECK</span><div class="grow"><div class="truncate" style="font-weight:600">${esc(n.deck.title)}</div><div class="muted" style="font-size:12.5px">${n.deck.slides.length} slides · open to edit and export</div></div>${ico("arrowr", "sm")}</button>` : "";
     const report = n.report ? `<button class="artifact-card" data-act="open-report" data-id="${n.id}"><span class="file-ico">RPT</span><div class="grow"><div class="truncate" style="font-weight:600">${esc(n.report.title)}</div><div class="muted" style="font-size:12.5px">${sources.length} sources · open to export</div></div>${ico("arrowr", "sm")}</button>` : "";
     const chips = sources.length && mode !== "research" ? `<div class="cites">${sources.slice(0, 8).map((s, i) => `<a class="cite-chip" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer"><b>${i + 1}</b><span class="truncate">${esc(safe(() => new URL(s.url).hostname.replace(/^www\./, ""), s.title))}</span></a>`).join("")}</div>` : "";
     const sug = isLast && !n.pending && (n.suggest || []).length ? `<div class="suggest">${n.suggest.map((q) => `<button data-suggest="${esc(q)}">${esc(q)}</button>`).join("")}</div>` : "";
-    const meta = !n.pending && n.model ? `<span class="meta">${esc(n.model)}${n.rz ? " · " + (n.rz === "off" ? "no reasoning" : n.rz + " effort") : ""}${n.usage ? ` · ${n.usage.est ? "~" : ""}${(n.usage.input || 0) + (n.usage.output || 0)} tokens` : ""}</span>` : "";
-    const tools = n.pending ? "" : `<div class="tools">${pager}<button class="tool-btn" data-act="copy-msg" data-id="${n.id}" aria-label="Copy" title="Copy">${ico("copy", "sm")}</button><button class="tool-btn" data-act="regen" data-id="${n.id}" aria-label="Regenerate" title="Regenerate">${ico("refresh", "sm")}</button><button class="tool-btn" data-act="speak" data-id="${n.id}" aria-label="Read aloud" title="Read aloud">${ico("speaker", "sm")}</button><button class="tool-btn ${n.fb === "up" ? "on" : ""}" data-act="fb" data-id="${n.id}" data-v="up" aria-label="Good response" title="Good response">${ico("thumbup", "sm")}</button><button class="tool-btn ${n.fb === "down" ? "on" : ""}" data-act="fb" data-id="${n.id}" data-v="down" aria-label="Bad response" title="Bad response">${ico("thumbdown", "sm")}</button>${n.stopped ? `<button class="btn sm ghost" data-act="cont" data-id="${n.id}">Continue</button>` : ""}${meta}</div>`;
-    return `<div class="msg assistant ${isLast ? "last" : ""}" data-node="${n.id}">${steps}${think}<div class="body">${body}${err}${n.stopped && !n.text ? `<span class="muted">Stopped.</span>` : ""}${arts}${deck}${report}${chips}${sug}</div>${tools}</div>`;
+    const meta = !n.pending && n.model ? `<span class="meta" title="${esc(fmtDate(n.ts))}">${esc(n.model)}${n.rz ? " · " + (n.rz === "off" ? "no reasoning" : n.rz + " effort") : ""}${n.usage ? ` · ${n.usage.est ? "~" : ""}${(n.usage.input || 0) + (n.usage.output || 0)} tokens` : ""}</span>` : "";
+    const tools = n.pending ? "" : `<div class="tools">${pager}<button class="tool-btn" data-act="copy-msg" data-id="${n.id}" aria-label="Copy" title="Copy">${ico("copy", "sm")}</button><button class="tool-btn" data-act="regen" data-id="${n.id}" aria-label="Regenerate" title="Regenerate">${ico("refresh", "sm")}</button><button class="tool-btn" data-act="speak" data-id="${n.id}" aria-label="Read aloud" title="Read aloud">${ico("speaker", "sm")}</button><button class="tool-btn ${n.fb === "up" ? "on" : ""}" data-act="fb" data-id="${n.id}" data-v="up" aria-label="Good response" aria-pressed="${n.fb === "up"}" title="Good response">${ico("thumbup", "sm")}</button><button class="tool-btn ${n.fb === "down" ? "on" : ""}" data-act="fb" data-id="${n.id}" data-v="down" aria-label="Bad response" aria-pressed="${n.fb === "down"}" title="Bad response">${ico("thumbdown", "sm")}</button><button class="tool-btn" data-act="msg-more" data-id="${n.id}" aria-label="More actions" aria-haspopup="menu" title="More">${ico("more", "sm")}</button>${n.stopped ? `<button class="btn sm ghost" data-act="cont" data-id="${n.id}">Continue</button>` : ""}${meta}</div>`;
+    return `<div class="msg assistant ${isLast ? "last" : ""}${anim}" data-node="${n.id}" aria-busy="${!!n.pending}"><div data-part="steps">${steps}</div><div data-part="think">${think}</div><div class="body" data-part="body">${body}${gen}${err}${n.stopped && !n.text && !gen ? `<span class="muted">Stopped.</span>` : ""}${arts}${deck}${report}${chips}${sug}</div><div data-part="tools">${tools}</div></div>`;
   },
 };
 const isMac = () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -276,10 +303,34 @@ ACTS.regen = (el) => regenerate(el.dataset.id);
 ACTS.cont = (el) => continueGeneration(el.dataset.id);
 ACTS.fb = (el) => { const n = curChat().nodes[el.dataset.id]; n.fb = n.fb === el.dataset.v ? "" : el.dataset.v; Store.saveChat(curChat()); UI.updateNode(curChat(), n); };
 ACTS.speak = (el) => { const n = curChat().nodes[el.dataset.id]; if (!("speechSynthesis" in window)) return toast("Speech isn't supported here."); if (speechSynthesis.speaking) { speechSynthesis.cancel(); return; } const u = new SpeechSynthesisUtterance((n.text || "").replace(/[#*_`>\[\]]/g, "")); const v = speechSynthesis.getVoices().find((x) => x.name === Store.settings.ttsVoice); if (v) u.voice = v; speechSynthesis.speak(u); };
-ACTS["edit-msg"] = async (el) => {
-  const c = curChat(), n = c.nodes[el.dataset.id]; if (isBusy()) return;
-  const m = openModal({ title: "Edit message", body: `<textarea class="input" id="em" rows="6">${esc(n.text)}</textarea>`, foot: `<button class="btn" data-close>Cancel</button><button class="btn primary" data-ok>Save &amp; resend</button>` });
-  m.el.querySelector("[data-ok]").addEventListener("click", () => { const t = m.el.querySelector("#em").value; m.close(); if (t.trim()) editAndResend(n.id, t); });
+// Inline editing, like ChatGPT: the bubble turns into a text box with Cancel / Send.
+ACTS["edit-msg"] = (el) => {
+  const c = curChat(), n = c.nodes[el.dataset.id]; if (!n || isBusy()) return;
+  const msg = document.querySelector(`.msg.user[data-node="${n.id}"]`); if (!msg || msg.querySelector(".edit-inline")) return;
+  const box = document.createElement("div"); box.className = "edit-inline";
+  box.innerHTML = `<textarea class="input" aria-label="Edit message" rows="2">${esc(n.text)}</textarea><div class="row" style="justify-content:flex-end;gap:8px"><button class="btn sm" data-x="cancel">Cancel</button><button class="btn primary sm" data-x="send">Send</button></div>`;
+  const body = msg.querySelector(".body"); body ? body.replaceWith(box) : msg.prepend(box);
+  msg.querySelector(".tools").style.display = "none";
+  const ta = box.querySelector("textarea"), fit = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 260) + "px"; };
+  fit(); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); ta.addEventListener("input", fit);
+  const send = () => { const t = ta.value.trim(); if (t) editAndResend(n.id, t); else UI.renderThread(); };
+  box.querySelector('[data-x="cancel"]').addEventListener("click", () => UI.renderThread());
+  box.querySelector('[data-x="send"]').addEventListener("click", send);
+  ta.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); UI.renderThread(); } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); send(); } });
+};
+ACTS["to-bottom"] = () => { UI.stick = true; const t = $("thread"); t.scrollTo({ top: t.scrollHeight, behavior: "smooth" }); };
+ACTS["open-image"] = (el) => { const n = curChat().nodes[el.dataset.id]; Canvas.show({ type: "image", src: n.gen[+el.dataset.i] }); };
+ACTS["dl-image"] = (el) => { const n = curChat().nodes[el.dataset.id]; fetch(n.gen[+el.dataset.i]).then((r) => r.blob()).then((b) => download(b, "chatesp-image." + (b.type.includes("png") ? "png" : "jpg"))); };
+ACTS["msg-more"] = (el) => {
+  const c = curChat(), n = c.nodes[el.dataset.id], items = [];
+  items.push({ label: "Try again", icon: "refresh", fn: () => regenerate(n.id) });
+  const opts = []; for (const p of Object.keys(PROVIDERS)) if (Dev.configured(p)) for (const m of (Dev.models[p] || []).slice(0, 40)) opts.push({ p, id: m.id, name: m.name });
+  const fav = Store.settings.favModels.concat(Store.settings.recentModels), pick = []; fav.forEach((k) => { const o = opts.find((x) => x.p + "|" + x.id === k); if (o && !pick.includes(o)) pick.push(o); });
+  opts.filter((o) => o.p === c.provider && !pick.includes(o)).slice(0, 6).forEach((o) => pick.push(o));
+  const others = pick.filter((o) => !(o.p === n.provider && o.id === n.model)).slice(0, 7);
+  if (others.length) { items.push({ hd: "Try with another model" }); others.forEach((o) => items.push({ label: o.name, icon: "cpu", sub: PROVIDERS[o.p].label, fn: () => regenerate(n.id, { provider: o.p, model: o.id }) })); }
+  items.push({ sep: 1 }, { label: "Branch in new chat", icon: "branch", fn: () => branchChat(n.id) }, { label: "Copy as Markdown", icon: "copy", fn: () => { copyText(n.text || ""); toast("Copied", "ok", "", 1200); } });
+  openMenu(el, items, { up: true });
 };
 ACTS.remember = (el) => { const n = curChat().nodes[el.dataset.id]; Store.memory.push({ id: uid(), text: n.text.slice(0, 300) }); Store.saveMemory(); toast("Remembered", "ok", "It will be included in future chats. Manage in Settings → Personalization."); };
 ACTS.mic = (el) => {

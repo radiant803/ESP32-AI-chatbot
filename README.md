@@ -17,6 +17,16 @@ presentations, files) runs in the browser you open it from. Runs on **ESP32** an
 - All v1 features kept: four providers, live model discovery only, transactional Test & Save, distinct error classes,
   keys never returned to the browser, recovery AP, artifact storage, 320 px layout.
 
+## Output quality
+
+Answers render like the big chat apps: aligned tables with copy, typeset math (KaTeX, `$...$`, `$$...$$`, `\(...\)`), nested and task lists, footnotes,
+syntax-highlighted code with copy / wrap / download / collapse, a live "Thinking" panel that becomes "Thought for 7s", in-place streaming
+(no flicker), a scroll-to-latest button, inline message editing (or press Up), "try with another model", branch to a new chat, generated images with a viewer,
+and files that look finished: Word documents with real styles, tables, lists and page numbers, and Excel workbooks with a styled frozen header, filters, number/percent/date types and formulas.
+Math and Office export load their libraries from a CDN the first time they are needed.
+
+Run the checks with `node web/test/markdown.test.cjs` and `node web/test/reasoning.test.cjs`.
+
 ## How it works
 
 ```

@@ -151,14 +151,10 @@ ACTS.compare = () => {
 function imageDialog() {
   const chat = curChat();
   const m = openModal({ title: "Generate an image", body: `<div class="field"><label for="ig">Describe the image</label><textarea class="input" id="ig" rows="3" placeholder="A watercolour of an ESP32 board on a desk, morning light"></textarea><span class="help">Uses ${esc(PROVIDERS[chat.provider]?.label || "your provider")} image generation (OpenAI or Gemini). Provider charges may apply.</span></div><div id="ig-out"></div>`, foot: `<button class="btn" data-close>Close</button><button class="btn primary" id="ig-go">Generate</button>` });
-  m.el.querySelector("#ig-go").addEventListener("click", async (e) => {
-    const p = m.el.querySelector("#ig").value.trim(); if (!p) return; e.target.disabled = true; m.el.querySelector("#ig-out").innerHTML = `<div class="skeleton" style="height:240px"></div>`;
-    try {
-      const url = await generateImage(chat.provider, p);
-      const u = addNode(chat, chatPath(chat).slice(-1)[0]?.id || null, { role: "user", text: "Generate an image: " + p });
-      addNode(chat, u.id, { role: "assistant", text: "Here is your image: " + p.slice(0, 80), gen: [url], provider: chat.provider, model: "image", steps: [], sources: [] });
-      if (chat.title === "New chat") chat.title = p.slice(0, 50); Store.saveChat(chat); m.close(); UI.render({ scroll: true });
-    } catch (err) { m.el.querySelector("#ig-out").innerHTML = `<div class="err-card"><b>${esc(errView(err).message)}</b><span>${esc(errView(err).hint)}</span></div>`; e.target.disabled = false; }
+  m.el.querySelector("#ig-go").addEventListener("click", () => {
+    const p = m.el.querySelector("#ig").value.trim(); if (!p) return;
+    if (!["openai", "google"].includes(chat.provider)) { m.el.querySelector("#ig-out").innerHTML = `<div class="err-card"><b>Image generation needs OpenAI or Google.</b><span>Switch the model first.</span></div>`; return; }
+    m.close(); runImageTurn(chat, p);
   });
 }
 function personaMenu() {

@@ -53,4 +53,7 @@ DuckDuckGo (keyless); Tavily/Brave/SearXNG optional; native provider search is o
   - Soak: 15 of 15 rounds of page + assets + 21 KB model list + streamed chat; 12 of 12 downloads of the 65 KB app.js; no reboots; free heap about 34 KB idle.
   - App-side safeguards for the small device: device requests run one at a time (`Dev.serial`), `low_memory` is retried automatically,
     and titles and follow-up suggestions are skipped on devices with a request limit under 12 KB or whenever another request is queued.
+- Quality pass (2026-11-21): markdown engine rewritten (45 unit tests: aligned tables, nested/task lists, math, footnotes, escapes, highlighting for 9 language families);
+  messages patch in place while streaming; live reasoning panel; inline edit, model switch, branch; image turns; Word/Excel output built with docx styles and ExcelJS;
+  JSON extraction no longer breaks on code fences inside strings. Verified on the mock and on the NodeMCU with a real gpt-5-nano answer (equation, table, code) at 390 px and desktop widths.
 - Still unverified: Anthropic, Gemini and Ollama traffic, firmware update over Wi-Fi, and anything on ESP32 hardware.

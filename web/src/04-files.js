@@ -41,25 +41,17 @@ async function composeArtifact(spec) {
   if (spec.type === "docx") {
     await loadScript(LIBS.docx); const D = window.docx;
     if (!D) throw new ApiError("library_unavailable", "DOCX generation is unavailable.", "Reload and retry.");
-    const kids = [new D.Paragraph({ text: String(spec.title || "Document"), heading: D.HeadingLevel.TITLE })];
-    for (const s of (spec.sections || []).slice(0, 40)) {
-      if (s.heading) kids.push(new D.Paragraph({ text: String(s.heading), heading: D.HeadingLevel.HEADING_1 }));
-      String(s.text || "").split(/\n{2,}/).filter(Boolean).forEach((p) => kids.push(new D.Paragraph({ text: p.trim(), spacing: { after: 160 } })));
-      (s.bullets || []).forEach((b) => kids.push(new D.Paragraph({ text: String(b), bullet: { level: 0 } })));
-    }
-    return { blob: await D.Packer.toBlob(new D.Document({ creator: "ChatESP", title: String(spec.title || ""), sections: [{ children: kids }] })), spec };
+    const md = spec.markdown || sectionsToMarkdown(spec.sections) || String(spec.content || "");
+    return { blob: await D.Packer.toBlob(docxFromMarkdown(D, md, spec.title || "Document")), spec };
   }
   if (spec.type === "xlsx") {
-    await loadScript(LIBS.xlsx); const X = window.XLSX;
-    if (!X) throw new ApiError("library_unavailable", "XLSX generation is unavailable.", "Reload and retry.");
-    const wb = X.utils.book_new();
-    (spec.sheets || []).slice(0, 6).forEach((sh, i) => {
-      const rows = [Array.isArray(sh.columns) ? sh.columns.slice(0, 26) : []].concat((sh.rows || []).slice(0, 500).map((r) => (Array.isArray(r) ? r.slice(0, 26) : [])));
-      const ws = X.utils.aoa_to_sheet(rows);
-      X.utils.book_append_sheet(wb, ws, String(sh.name || "Sheet" + (i + 1)).replace(/[\\/*?:[\]]/g, "_").slice(0, 31) || "Sheet" + (i + 1));
-    });
-    if (!wb.SheetNames.length) X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([[String(spec.title || "ChatESP")]]), "Sheet1");
-    return { blob: new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: MIME.xlsx }), spec };
+    try { return { blob: await xlsxWorkbook(spec), spec }; }
+    catch (e) {
+      if (!(e instanceof ApiError)) throw e;  // library blocked: fall back to the plain SheetJS writer
+      await loadScript(LIBS.xlsx); const X = window.XLSX; const wb = X.utils.book_new();
+      (spec.sheets || []).slice(0, 6).forEach((sh, i) => X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([sh.columns || []].concat(sh.rows || [])), String(sh.name || "Sheet" + (i + 1)).slice(0, 31)));
+      return { blob: new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: MIME.xlsx }), spec };
+    }
   }
   const deck = spec.deck || { title: spec.title, slides: spec.slides || [], theme: "paper" };
   return { blob: await exportPptx(deck), spec };
@@ -88,7 +80,7 @@ async function buildAndStore(spec, { download: dl = true } = {}) {
 }
 function previewFor(s) {
   if (s.type === "text" || s.type === "code" || s.type === "html") return String(s.content || "").slice(0, 60000);
-  if (s.type === "docx") return (s.sections || []).map((x) => `${x.heading ? "## " + x.heading + "\n" : ""}${x.text || ""}${(x.bullets || []).map((b) => "\n- " + b).join("")}`).join("\n\n");
+  if (s.type === "docx") return s.markdown || sectionsToMarkdown(s.sections);
   if (s.type === "xlsx") return JSON.stringify({ sheets: s.sheets || [] });
   return "";
 }
@@ -184,4 +176,108 @@ async function printDeck(deck) {
   const f = document.createElement("iframe"); f.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0"; document.body.append(f);
   f.srcdoc = html; await new Promise((r) => (f.onload = r)); await sleep(300);
   f.contentWindow.focus(); f.contentWindow.print(); setTimeout(() => f.remove(), 4000);
+}
+
+// ---- Rich Word and Excel output ----
+LIBS.exceljs = "https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js";
+function sectionsToMarkdown(sections) {
+  return (sections || []).map((s) => `${s.heading ? "## " + s.heading + "\n\n" : ""}${s.text ? String(s.text).trim() + "\n\n" : ""}${(s.bullets || []).map((b) => "- " + b).join("\n")}`.trim()).join("\n\n");
+}
+function docxInline(D, text, base = {}) {
+  const out = [], re = /(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|(?<![\w])_[^_\s][^_]*_(?!\w)|`[^`]+`|~~[^~]+~~|\[[^\]]+\]\(https?:[^)\s]+\))/g;
+  let last = 0, m; text = String(text).replace(/\\([\\`*_{}[\]()#+\-.!|])/g, "$1");
+  const run = (t, o = {}) => new D.TextRun({ text: t, ...base, ...o });
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(run(text.slice(last, m.index)));
+    const t = m[0];
+    if (t.startsWith("***")) out.push(run(t.slice(3, -3), { bold: true, italics: true }));
+    else if (t.startsWith("**") || t.startsWith("__")) out.push(run(t.slice(2, -2), { bold: true }));
+    else if (t.startsWith("~~")) out.push(run(t.slice(2, -2), { strike: true }));
+    else if (t[0] === "*" || t[0] === "_") out.push(run(t.slice(1, -1), { italics: true }));
+    else if (t[0] === "`") out.push(run(t.slice(1, -1), { font: "Consolas", size: 20, shading: { type: D.ShadingType.CLEAR, fill: "F1F5F9", color: "auto" } }));
+    else { const l = t.match(/^\[([^\]]+)\]\((https?:[^)\s]+)\)$/); out.push(new D.ExternalHyperlink({ link: l[2], children: [new D.TextRun({ text: l[1], style: "Hyperlink" })] })); }
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(run(text.slice(last)));
+  return out.length ? out : [run("")];
+}
+function docxFromMarkdown(D, md, title) {
+  const kids = [], lines = String(md || "").replace(/\r\n?/g, "\n").split("\n"), H = [D.HeadingLevel.HEADING_1, D.HeadingLevel.HEADING_2, D.HeadingLevel.HEADING_3, D.HeadingLevel.HEADING_4];
+  let i = 0, instance = 0, inOrdered = false;
+  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
+  const isSep = (l) => /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(l || "");
+  if (title) { kids.push(new D.Paragraph({ text: String(title), heading: D.HeadingLevel.TITLE })); kids.push(new D.Paragraph({ spacing: { after: 200 }, children: [new D.TextRun({ text: new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }), color: "6B7280", size: 20 })] })); }
+  while (i < lines.length) {
+    const l = lines[i]; let m;
+    if (!l.trim()) { i++; continue; }
+    if ((m = l.match(/^\s*(```+|~~~+)/))) { const body = []; i++; while (i < lines.length && !lines[i].trim().startsWith(m[1])) body.push(lines[i++]); i++; body.forEach((c, k) => kids.push(new D.Paragraph({ spacing: { after: k === body.length - 1 ? 160 : 0, line: 260 }, shading: { type: D.ShadingType.CLEAR, fill: "F1F5F9", color: "auto" }, indent: { left: 120, right: 120 }, children: [new D.TextRun({ text: c || " ", font: "Consolas", size: 19 })] }))); inOrdered = false; continue; }
+    if ((m = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/))) { kids.push(new D.Paragraph({ heading: H[Math.min(m[1].length, 4) - 1], children: docxInline(D, m[2]) })); i++; inOrdered = false; continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { kids.push(new D.Paragraph({ spacing: { before: 120, after: 120 }, border: { bottom: { style: D.BorderStyle.SINGLE, size: 6, color: "D1D5DB", space: 1 } } })); i++; inOrdered = false; continue; }
+    if (l.includes("|") && isSep(lines[i + 1])) {
+      const head = cells(l); i += 2; const rows = [head]; while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+      kids.push(new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, rows: rows.map((r, ri) => new D.TableRow({ tableHeader: ri === 0, cantSplit: true, children: head.map((_, ci) => new D.TableCell({ shading: ri === 0 ? { type: D.ShadingType.CLEAR, fill: "EEF2FF", color: "auto" } : undefined, margins: { top: 70, bottom: 70, left: 110, right: 110 }, children: [new D.Paragraph({ children: docxInline(D, r[ci] || "", ri === 0 ? { bold: true } : {}) })] })) })) }));
+      kids.push(new D.Paragraph({ spacing: { after: 120 } })); inOrdered = false; continue;
+    }
+    if (/^\s*>/.test(l)) { const q = []; while (i < lines.length && /^\s*>/.test(lines[i])) q.push(lines[i++].replace(/^\s*>\s?/, "")); kids.push(new D.Paragraph({ indent: { left: 360 }, spacing: { after: 160 }, border: { left: { style: D.BorderStyle.SINGLE, size: 18, color: "A5B4FC", space: 10 } }, children: docxInline(D, q.join(" "), { italics: true, color: "4B5563" }) })); inOrdered = false; continue; }
+    if ((m = l.match(/^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/))) {
+      const level = Math.min(4, Math.floor(m[1].replace(/\t/g, "    ").length / 2)), ordered = /\d/.test(m[2]);
+      if (ordered && (!inOrdered || level === 0 && !kids.length)) instance++; inOrdered = ordered || inOrdered;
+      let text = m[3], task = text.match(/^\[([ xX])\]\s+(.*)$/); if (task) text = (task[1] === " " ? "☐ " : "☑ ") + task[2];
+      kids.push(new D.Paragraph({ children: docxInline(D, text), spacing: { after: 60 }, ...(ordered ? { numbering: { reference: "ce-num", level, instance } } : { bullet: { level } }) })); i++; continue;
+    }
+    const p = [l.trim()]; i++;
+    while (i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>|[-*+]\s|\d{1,9}[.)]\s)/.test(lines[i]) && !(lines[i].includes("|") && isSep(lines[i + 1]))) p.push(lines[i++].trim());
+    kids.push(new D.Paragraph({ children: docxInline(D, p.join(" ")) })); inOrdered = false;
+  }
+  const levels = (fmt) => Array.from({ length: 5 }, (_, level) => ({ level, format: fmt, text: `%${level + 1}.`, alignment: D.AlignmentType.START, style: { paragraph: { indent: { left: 720 + level * 360, hanging: 360 } } } }));
+  const hd = (id, name, size, before, color) => ({ id, name, basedOn: "Normal", next: "Normal", quickFormat: true, run: { size, bold: true, color }, paragraph: { spacing: { before, after: 120 }, keepNext: true } });
+  return new D.Document({
+    creator: "ChatESP", title: String(title || ""),
+    styles: {
+      default: { document: { run: { font: "Calibri", size: 22 }, paragraph: { spacing: { line: 288, after: 140 } } } },
+      paragraphStyles: [{ id: "Title", name: "Title", basedOn: "Normal", next: "Normal", quickFormat: true, run: { size: 52, bold: true, color: "111827" }, paragraph: { spacing: { after: 80 } } }, hd("Heading1", "Heading 1", 32, 360, "1F2937"), hd("Heading2", "Heading 2", 27, 280, "1F2937"), hd("Heading3", "Heading 3", 24, 220, "374151"), hd("Heading4", "Heading 4", 22, 180, "374151")],
+      characterStyles: [{ id: "Hyperlink", name: "Hyperlink", basedOn: "DefaultParagraphFont", run: { color: "2563EB", underline: { type: "single" } } }],
+    },
+    numbering: { config: [{ reference: "ce-num", levels: levels(D.LevelFormat.DECIMAL) }] },
+    sections: [{
+      properties: { page: { margin: { top: 1300, bottom: 1300, left: 1300, right: 1300 } } },
+      headers: { default: new D.Header({ children: [new D.Paragraph({ alignment: D.AlignmentType.RIGHT, children: [new D.TextRun({ text: String(title || ""), color: "9CA3AF", size: 17 })] })] }) },
+      footers: { default: new D.Footer({ children: [new D.Paragraph({ alignment: D.AlignmentType.CENTER, children: [new D.TextRun({ children: ["Page ", D.PageNumber.CURRENT, " of ", D.PageNumber.TOTAL_PAGES], color: "9CA3AF", size: 17 })] })] }) },
+      children: kids,
+    }],
+  });
+}
+// Converts a cell value: numbers, percentages, currency, ISO dates and =formulas become real Excel values.
+function xlsxCell(v) {
+  if (v == null) return { value: null };
+  if (typeof v === "number") return { value: v };
+  const t = String(v).trim();
+  if (t.startsWith("=") && t.length > 1) return { value: { formula: t.slice(1) } };
+  let m;
+  if ((m = t.match(/^\(?-?\$?\s*-?[\d,]*\.?\d+\)?$/)) && /\d/.test(t) && !/^0\d/.test(t.replace(/[$,\s()-]/g, ""))) { const neg = /^\(.*\)$/.test(t) || /-/.test(t), n = parseFloat(t.replace(/[^\d.]/g, "")) * (neg ? -1 : 1); return { value: n, fmt: t.includes("$") ? '"$"#,##0.00' : /\./.test(t) ? "#,##0.00" : "#,##0" }; }
+  if ((m = t.match(/^(-?\d+(?:\.\d+)?)\s*%$/))) return { value: parseFloat(m[1]) / 100, fmt: "0.0%" };
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) { const d = new Date(t + "T00:00:00Z"); if (!isNaN(d)) return { value: d, fmt: "yyyy-mm-dd" }; }
+  return { value: t };
+}
+async function xlsxWorkbook(spec) {
+  await loadScript(LIBS.exceljs); const E = window.ExcelJS;
+  if (!E) throw new ApiError("library_unavailable", "XLSX generation is unavailable.", "Reload and retry.");
+  const wb = new E.Workbook(); wb.creator = "ChatESP"; wb.created = new Date();
+  const thin = { style: "thin", color: { argb: "FFE5E7EB" } };
+  (spec.sheets || []).slice(0, 6).forEach((sh, si) => {
+    const ws = wb.addWorksheet(String(sh.name || "Sheet" + (si + 1)).replace(/[\\/*?:[\]]/g, "_").slice(0, 31) || "Sheet" + (si + 1), { views: [{ state: "frozen", ySplit: 1 }] });
+    const cols = (sh.columns || []).slice(0, 26), rows = (sh.rows || []).slice(0, 1000);
+    ws.addRow(cols);
+    const hr = ws.getRow(1); hr.height = 24;
+    hr.eachCell((c) => { c.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF4F46E5" } }; c.alignment = { vertical: "middle", horizontal: "left" }; c.border = { bottom: thin }; });
+    const numeric = cols.map(() => 0);
+    rows.forEach((r, ri) => {
+      const row = ws.addRow([]);
+      cols.forEach((_, ci) => { const x = xlsxCell((r || [])[ci]), c = row.getCell(ci + 1); c.value = x.value; if (x.fmt) c.numFmt = x.fmt; if (typeof x.value === "number" || (x.value && x.value.formula)) { numeric[ci]++; c.alignment = { horizontal: "right" }; } c.border = { bottom: thin }; if (ri % 2) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF9FAFB" } }; });
+    });
+    cols.forEach((name, ci) => { const longest = Math.max(String(name).length, ...rows.slice(0, 200).map((r) => String((r || [])[ci] == null ? "" : (r || [])[ci]).length)); ws.getColumn(ci + 1).width = clamp(longest + 3, 10, 52); });
+    if (cols.length && rows.length) ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: rows.length + 1, column: cols.length } };
+  });
+  if (!wb.worksheets.length) wb.addWorksheet("Sheet1").addRow([String(spec.title || "ChatESP")]);
+  return new Blob([await wb.xlsx.writeBuffer()], { type: MIME.xlsx });
 }

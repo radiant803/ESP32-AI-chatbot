@@ -16,6 +16,7 @@ const Canvas = {
     const s = this.spec, el = $("canvas"); if (!s) return;
     if (s.type === "html") el.innerHTML = this.head(s.title || "Preview", `<button class="icon-btn" data-act="cv-copy" aria-label="Copy" title="Copy source">${ico("copy")}</button>`) + `<div class="cv-body"><iframe class="cv-frame" sandbox="allow-scripts" title="Preview"></iframe></div>`, el.querySelector("iframe").srcdoc = s.html;
     else if (s.type === "text") el.innerHTML = this.head(s.title, `<button class="icon-btn" data-act="cv-copy" aria-label="Copy">${ico("copy")}</button>`) + `<div class="cv-body">${/\.md$/i.test(s.name || "") ? `<div class="cv-doc md">${renderMarkdown(s.text)}</div>` : `<div class="cv-pad"><div class="code"><pre><code>${esc(s.text)}</code></pre></div></div>`}</div>`;
+    else if (s.type === "image") el.innerHTML = this.head("Image", `<button class="icon-btn" data-act="cv-dl-image" aria-label="Download image">${ico("download")}</button>`) + `<div class="cv-body"><div class="cv-pad" style="display:grid;place-items:center;min-height:100%"><img class="cv-img" alt="Generated image" src="${esc(s.src)}"></div></div>`;
     else if (s.type === "artifact") this.artifact();
     else if (s.type === "report") this.report();
     else if (s.type === "deck") this.deckStudio();
@@ -72,6 +73,7 @@ const Canvas = {
   syncStage() { const d = this.node().deck, th = THEMES[d.theme] || THEMES.paper; $("dk-stage").innerHTML = slideHTML(d.slides[this.sel], th, this.sel, d.slides.length); const t = document.querySelector(`.thumb[data-i="${this.sel}"]`); if (t) t.innerHTML = `<span class="n">${this.sel + 1}</span>` + slideHTML(d.slides[this.sel], th, this.sel, d.slides.length); },
 };
 ACTS["cv-close"] = () => Canvas.close();
+ACTS["cv-dl-image"] = () => { const src = Canvas.spec.src; fetch(src).then((r) => r.blob()).then((b) => download(b, "chatesp-image." + (b.type.includes("png") ? "png" : "jpg"))); };
 ACTS["cv-copy"] = () => { const s = Canvas.spec; copyText(s.copy || s.html || s.text || ""); toast("Copied", "ok", "", 1200); };
 ACTS["dk-sel"] = (el) => { Canvas.sel = +el.dataset.i; document.querySelectorAll(".thumb").forEach((t) => t.classList.toggle("on", +t.dataset.i === Canvas.sel)); Canvas.drawMain(); };
 ACTS["dk-add"] = () => { const d = Canvas.node().deck; d.slides.splice(Canvas.sel + 1, 0, { layout: "bullets", title: "New slide", subtitle: "", bullets: ["Point one", "Point two"], left: [], right: [], quote: "", attribution: "", chart: null, imagePrompt: "", image: "", notes: "" }); Canvas.sel++; Canvas.touchDeck(); Canvas.drawStrip(); Canvas.drawMain(); };
@@ -136,7 +138,7 @@ ACTS["rp-export"] = (el) => {
   const withRefs = n.text + "\n\n## Sources\n" + n.sources.map((s, i) => `${i + 1}. [${s.title}](${s.url})`).join("\n");
   openMenu(el, [
     { label: "Markdown (.md)", icon: "file", fn: () => download(new Blob([withRefs], { type: "text/markdown" }), base + ".md") },
-    { label: "Word (.docx)", icon: "file", fn: async () => { const r2 = await buildAndStore({ type: "docx", filename: base + ".docx", title: r.title, sections: mdToSections(n.text, n.sources) }); toast(r2.stored ? "Downloaded and stored on device" : "Downloaded", "ok", r2.storeError); } },
+    { label: "Word (.docx)", icon: "file", fn: async () => { const r2 = await buildAndStore({ type: "docx", filename: base + ".docx", title: r.title, markdown: n.text + "\n\n## Sources\n\n" + n.sources.map((x, i) => `${i + 1}. [${x.title}](${x.url})`).join("\n") }); toast(r2.stored ? "Downloaded and stored on device" : "Downloaded", "ok", r2.storeError); } },
     { label: "PDF (print)", icon: "download", fn: async () => { const css = await fetch("app.css").then((x) => x.text()).catch(() => ""); const f = document.createElement("iframe"); f.style.cssText = "position:fixed;width:0;height:0;border:0;right:0;bottom:0"; document.body.append(f); f.srcdoc = `<!doctype html><style>${css}body{overflow:visible;background:#fff;color:#111;padding:32px;max-width:780px;margin:auto}</style><div class="md"><h1>${esc(r.title)}</h1>${renderMarkdown(n.text, n.sources)}<h2>Sources</h2><ol>${n.sources.map((s) => `<li><a href="${esc(s.url)}">${esc(s.title)}</a></li>`).join("")}</ol></div>`; await new Promise((x) => (f.onload = x)); f.contentWindow.print(); setTimeout(() => f.remove(), 4000); } },
   ], { align: "right" });
 };

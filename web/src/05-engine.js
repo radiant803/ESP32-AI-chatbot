@@ -13,7 +13,11 @@ const providerReady = (chat) => chat && chat.provider && chat.model && Dev.confi
 
 function systemPromptFor(chat, extra = "") {
   const s = Store.settings, parts = [];
-  parts.push("You are ChatESP, a helpful assistant running through a small ESP microcontroller gateway. Be accurate, concise and well organised. Use Markdown. Today is " + new Date().toDateString() + ".");
+  parts.push(`You are ChatESP, a capable, thoughtful assistant. Today is ${new Date().toDateString()}.
+Lead with the answer, then explain. Match depth to the question: brief for simple asks, thorough and well structured for complex ones.
+Format in Markdown. Use headings and lists to organise longer answers, tables for comparisons, and fenced code blocks with a language tag. Write math in LaTeX: $...$ inline and $$...$$ for display. Keep casual conversation plain; do not over-format.
+Be accurate. Say so when you are unsure or lack current information, and never invent sources, quotes, numbers or URLs. If a request is ambiguous, state your assumption or ask one short clarifying question.
+Be warm and direct, not sycophantic: skip filler openings like "Great question". Follow the user's instructions and constraints exactly.`);
   if (s.name) parts.push(`The user's name is ${s.name}.`);
   const tone = { concise: "Keep answers short and direct.", friendly: "Use a warm, friendly tone.", formal: "Use a formal, professional tone.", balanced: "" }[s.tone];
   if (tone) parts.push(tone);
@@ -32,6 +36,7 @@ function pathMessages(chat, upto) {
     let text = n.text || "";
     (n.atts || []).filter((a) => a.kind === "text").forEach((a) => { text = `[Attached file: ${a.name}]\n${a.text}\n[End of file]\n\n` + text; });
     if (n.role === "assistant" && n.artifacts && n.artifacts.length) text += "\n\n[Created files: " + n.artifacts.map((a) => a.name).join(", ") + "]";
+    if (n.role === "assistant" && n.gen && n.gen.length) text += "\n\n[Generated " + n.gen.length + " image(s) for the user]";
     return { role: n.role, text, images: (n.atts || []).filter((a) => a.kind === "image").map((a) => ({ mime: a.mime, b64: a.data.split(",")[1] || "" })) };
   });
   return msgs;
@@ -69,33 +74,35 @@ async function startSend(text, opts = {}) {
   if (chat.title === "New chat" && !opts.keepTitle) chat.title = text.replace(/\s+/g, " ").slice(0, 56) || "New chat";
   await runTurn(chat, user);
 }
-async function runTurn(chat, userNode) {
+async function runTurn(chat, userNode, over) {
+  const rc = over ? Object.assign({}, chat, over) : chat;  // a per-reply model override; nodes/rootsList stay shared with the real chat
   const ctl = new AbortController(); App.abort[chat.id] = ctl; App.busy.add(chat.id);
-  const node = addNode(chat, userNode.id, { role: "assistant", text: "", pending: true, provider: chat.provider, model: chat.model, mode: chat.mode, steps: [], sources: [] });
+  const rz = reasoningFor(rc.provider, rc.model, rc.effort, rc.think);
+  const node = addNode(chat, userNode.id, { role: "assistant", text: "", pending: true, provider: rc.provider, model: rc.model, mode: rc.mode, steps: [], sources: [], rz: rz ? (rz.on ? rz.level || "on" : "off") : undefined });
   Store.saveChat(chat); UI.render({ scroll: true });
   try {
-    if (chat.mode === "agent") await Agent.run(chat, node, userNode, ctl.signal);
-    else if (chat.mode === "research") await Research.run(chat, node, userNode, ctl.signal);
-    else if (chat.mode === "deck") await Deck.run(chat, node, userNode, ctl.signal);
-    else await plainTurn(chat, node, userNode, ctl.signal);
+    if (rc.mode === "agent") await Agent.run(rc, node, userNode, ctl.signal);
+    else if (rc.mode === "research") await Research.run(rc, node, userNode, ctl.signal);
+    else if (rc.mode === "deck") await Deck.run(rc, node, userNode, ctl.signal);
+    else await plainTurn(rc, node, userNode, ctl.signal);
   } catch (e) {
     if (e && e.name === "AbortError") { node.stopped = true; if (!node.text && !(node.artifacts || []).length && !node.report && !node.deck) node.text = ""; }
     else { console.error(e); const v = errView(e); node.error = v; }
   } finally {
-    node.pending = false; App.busy.delete(chat.id); delete App.abort[chat.id];
-    Store.saveChat(chat); UI.render({ scroll: false, final: node.id }); UI.afterTurn(chat, node);
+    node.pending = false; if (node.think && node.thinkStart && !node.thinkMs) node.thinkMs = Date.now() - node.thinkStart;
+    App.busy.delete(chat.id); delete App.abort[chat.id];
+    Store.saveChat(chat); UI.updateNode(chat, node); UI.afterTurn(chat, node);  // patch in place: no flash at the end of a reply
   }
 }
 async function plainTurn(chat, node, userNode, signal) {
   const req = fitToLimit(chat.provider, baseRequest(chat, "", { messages: pathMessages(chat, node.id) }));
   let last = 0;
   const res = await streamChat(chat.provider, req, {
-    onText: (d) => { node.text += d; const now = performance.now(); if (now - last > 60) { last = now; refreshNode(chat, node); } },
-    onThink: (d) => { node.think = (node.think || "") + d; },
+    onText: (d) => { if (!node.text && node.think && node.thinkStart && !node.thinkMs) node.thinkMs = Date.now() - node.thinkStart; node.text += d; const now = performance.now(); if (now - last > 60) { last = now; refreshNode(chat, node); } },
+    onThink: (d) => { node.think = (node.think || "") + d; node.thinkStart = node.thinkStart || Date.now(); const now = performance.now(); if (now - last > 120) { last = now; refreshNode(chat, node); } },
     onSource: (s) => node.sources.push(s),
   }, signal);
   node.text = res.text; node.usage = res.usage;
-  { const rz = reasoningFor(chat.provider, chat.model, chat.effort, chat.think); if (rz) node.rz = rz.on ? (rz.level || "on") : "off"; }
   if (!res.usage) node.usage = { input: estimateTokens(JSON.stringify(req.messages)), output: estimateTokens(res.text), est: true };
 }
 async function autoTitle(chat) {
@@ -114,10 +121,33 @@ async function suggestFollowUps(chat, node) {
   } catch (_) {}
 }
 function stopChat(id = App.chatId) { const c = App.abort[id]; if (c) c.abort(); }
-async function regenerate(nodeId) {
+async function regenerate(nodeId, over) {
   const chat = curChat(), node = chat.nodes[nodeId]; if (!node || isBusy()) return;
   const user = chat.nodes[node.parent]; if (!user) return;
-  await runTurn(chat, user);
+  await runTurn(chat, user, over);
+}
+// Copies the conversation up to a reply into a new chat so the user can take it in another direction.
+function branchChat(nodeId) {
+  const c = curChat(), path = chatPath(c), end = path.findIndex((n) => n.id === nodeId); if (end < 0) return;
+  const nc = newChat({ title: c.title.replace(/ \(branch\)$/, "") + " (branch)", provider: c.provider, model: c.model, projectId: c.projectId, mode: c.mode, effort: c.effort, think: c.think });
+  let parent = null;
+  for (const n of path.slice(0, end + 1)) {
+    const copy = JSON.parse(JSON.stringify({ role: n.role, text: n.text, atts: n.atts, model: n.model, provider: n.provider, mode: n.mode, sources: n.sources || [], gen: n.gen, artifacts: n.artifacts, deck: n.deck, report: n.report, usage: n.usage, rz: n.rz, hidden: n.hidden, steps: [] }));
+    parent = addNode(nc, parent, copy).id;
+  }
+  Store.chats[nc.id] = nc; Store.saveChat(nc); openChat(nc.id); toast("Branched into a new chat", "ok");
+}
+// Image generation as a proper chat turn: the reply shows a placeholder, then the image.
+async function runImageTurn(chat, prompt) {
+  if (isBusy(chat.id)) return;
+  const path = chatPath(chat), user = addNode(chat, path.length ? path[path.length - 1].id : null, { role: "user", text: "Generate an image: " + prompt });
+  const ctl = new AbortController(); App.abort[chat.id] = ctl; App.busy.add(chat.id);
+  const node = addNode(chat, user.id, { role: "assistant", text: "", pending: true, genPending: true, provider: chat.provider, model: "image", mode: "image", steps: [], sources: [] });
+  if (chat.title === "New chat") chat.title = prompt.slice(0, 50);
+  Store.saveChat(chat); UI.render({ scroll: true });
+  try { const url = await generateImage(chat.provider, prompt, ctl.signal); node.gen = [await downscaleDataUrl(url, 1024, 380000)]; node.text = "Here is your image."; }
+  catch (e) { if (e && e.name === "AbortError") node.stopped = true; else node.error = errView(e); }
+  finally { node.pending = false; node.genPending = false; App.busy.delete(chat.id); delete App.abort[chat.id]; Store.saveChat(chat); UI.render(); UI.afterTurn(chat, node); }
 }
 async function editAndResend(nodeId, text) {
   const chat = curChat(), old = chat.nodes[nodeId]; if (!old || isBusy()) return;
@@ -133,7 +163,7 @@ async function continueGeneration(nodeId) {
 // JSON helper for tool-style prompts (agent, deck, research). Tolerates fences and prose around the JSON.
 function extractJson(text) {
   let t = String(text || "").trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i); if (fence) t = fence[1].trim();
+  const fence = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i); if (fence) t = fence[1].trim();  // only a fence wrapping the whole reply, never one inside a string
   const a = t.search(/[{[]/); if (a < 0) throw new ApiError("json_invalid", "The model did not return structured data.", "Retry, or try a more capable model.");
   const open = t[a], close = open === "{" ? "}" : "]", b = t.lastIndexOf(close);
   try { return JSON.parse(t.slice(a, b + 1)); } catch (_) {

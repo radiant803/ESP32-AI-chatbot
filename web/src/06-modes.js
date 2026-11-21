@@ -36,7 +36,7 @@ Tools:
 - search {"query":"..."}: web search; returns titles, urls, snippets.
 - read {"url":"..."}: fetch a page's text.
 - calculate {"expression":"..."}: exact arithmetic.
-- create_file {"type":"text|code|html|docx|xlsx","filename":"safe-name.ext","title":"...","content":"..." (text/code/html),"sections":[{"heading":"...","text":"...","bullets":["..."]}] (docx),"sheets":[{"name":"...","columns":["..."],"rows":[["..."]]}] (xlsx)}. Keep files modest (under 150 KB).
+- create_file {"type":"text|code|html|docx|xlsx","filename":"safe-name.ext","title":"...","content":"..." (text/code/html),"markdown":"full document in Markdown with headings, lists and tables (docx; preferred over sections)","sections":[{"heading":"...","text":"...","bullets":["..."]}] (docx alternative),"sheets":[{"name":"...","columns":["..."],"rows":[["..."]]}] (xlsx; use real numbers, and formulas like =SUM(B2:B9) where useful)}. Keep files modest (under 150 KB).
 - make_presentation {"brief":"what the deck covers","slides":8}: designs and exports a PPTX deck.
 - final {"answer":"Markdown reply for the user; mention any files you created"}.
 Use at most ${this.MAX_STEPS} steps. Only search when the task needs current or external facts. Never run commands or code; you can only use the tools above.`;

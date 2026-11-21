@@ -38,15 +38,19 @@ function mockReply(system, last) {
   if (/follow-up questions/i.test(s)) return '["What are the trade-offs?","Show me an example","How would I test this?"]';
   if (/ChatESP's agent/i.test(s)) {
     const step = (last.match(/Tool result/g) || []).length;
+    if (step === 0 && /XLSX/.test(last)) return JSON.stringify({ thought: "Building the sheet.", action: "create_file", args: { type: "xlsx", filename: "budget.xlsx", title: "Budget", sheets: [{ name: "Monthly", columns: ["Item", "Category", "Amount", "Share", "Due"], rows: [["Rent", "Fixed", "$1,200.00", "40%", "2026-12-01"], ["Groceries", "Variable", "450", "15%", "2026-12-05"], ["Savings", "Goal", "300.5", "10%", "2026-12-10"], ["Total", "", "=SUM(C2:C4)", "", ""]] }] } });
+    if (step === 0 && /RICHDOC/.test(last)) return JSON.stringify({ thought: "Writing the memo.", action: "create_file", args: { type: "docx", filename: "memo.docx", title: "Project memo", markdown: "## Summary\n\nThis is a **bold** claim with *emphasis*, `inline code` and a [link](https://example.com).\n\n1. First step\n   - nested bullet\n2. Second step\n\n| Phase | Owner | Status |\n|---|---|---|\n| Design | Ana | Done |\n| Build | Raj | In progress |\n\n> Keep the scope small.\n\n```python\nprint('hello')\n```\n\n- [x] Kickoff\n- [ ] Launch" } });
     if (step === 0) return JSON.stringify({ thought: "I will create a short brief document.", action: "create_file", args: { type: "docx", filename: "brief.docx", title: "Project Brief", sections: [{ heading: "Goal", text: "Build a small ESP32 gateway." }, { heading: "Scope", bullets: ["Keys on device", "Chats in browser"] }] } });
     if (step === 1) return JSON.stringify({ thought: "Done.", action: "final", args: { answer: "I created **brief.docx** with a goal and scope section." } });
   }
+  if (/RICH/.test(last)) return "## Understanding gradient descent\n\nGradient descent minimises a loss function $L(\\theta)$ by repeatedly stepping against the gradient. The update rule is:\n\n$$\\theta_{t+1} = \\theta_t - \\eta \\, \\nabla L(\\theta_t)$$\n\nwhere $\\eta$ is the **learning rate**. Key points:\n\n1. Choose a starting point\n   - random initialisation works for most networks\n   - zeros can break symmetry badly\n2. Compute the gradient\n3. Update, then repeat until *convergence*\n\n### Checklist\n- [x] Normalise inputs\n- [ ] Tune the learning rate\n- [ ] Add momentum\n\n```python\nimport numpy as np\n\ndef step(theta, grad, lr=0.1):\n    \"\"\"One update of gradient descent.\"\"\"\n    return theta - lr * grad  # simple and effective\n```\n\n```bash\npip install numpy matplotlib\n```\n\n| Optimiser | Memory | Typical use |\n|:--|--:|:-:|\n| SGD | low | baselines |\n| Adam | 2x params | most deep learning |\n\n> **Tip:** if the loss oscillates, lower the learning rate.\n\nA footnote-style note[^1] and an inline `code span`, a [link](https://example.com), and a very long unbroken token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\n---\n\nDone. Here is the inline math $E = mc^2$ and a price of $5 or $10 that must stay plain text.";
   return "Here is a **demo reply** from the mock server.\n\n1. It streams token by token\n2. It renders `inline code` and tables\n\n```python\ndef greet(name):\n    return f\"Hello, {name}!\"  # greeting\n```\n\n| Feature | Status |\n|---|---|\n| Streaming | ok |\n| Markdown | ok |\n\n> Quoted text looks like this.\n\nAsked: " + last.slice(0, 80);
 }
 async function streamOut(res, provider, text, delay = 12) {
   const hdr = { "Content-Type": provider === "ollama" ? "application/x-ndjson" : "text/event-stream", "Cache-Control": "no-cache" };
   res.writeHead(200, hdr);
   const chunks = text.match(/\S+\s*|\s+/g) || [text];
+  if (provider === "openai" && globalThis.__think) { for (const t of ["**Weighing the question** ", "I will check the key facts, ", "then answer plainly."]) { res.write(`data: ${JSON.stringify({ type: "response.reasoning_summary_text.delta", delta: t })}\n\n`); await sleep(500); } }
   if (provider === "anthropic") res.write(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 20 } } })}\n\n`);
   for (const c of chunks) {
     if (res.destroyed) return;
@@ -87,6 +91,7 @@ createServer(async (req, res) => {
       const b = JSON.parse(raw.toString() || "{}"); if (/images\/generations/.test(path)) return json(res, 200, { data: [{ b64_json: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" }] });
       store.last = { provider, path, body: b };
       const { system, last } = extract(provider, b);
+      globalThis.__think = !!(b.reasoning && b.reasoning.summary);
       if (/please-fail/.test(last)) return err(res, "rate_limited", 429, "The provider is rate-limiting this request (HTTP 429).", "Wait a moment, then retry.");
       return streamOut(res, provider, mockReply(system, last));
     }
