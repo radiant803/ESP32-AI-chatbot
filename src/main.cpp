@@ -3,6 +3,7 @@
 #include "artifacts.h"
 #include "config_store.h"
 #include "hal.h"
+#include "proxy.h"
 #include "http_api.h"
 
 // Optional compile-time Wi-Fi fallback. Prefer provisioning from the web app (Settings -> Device).
@@ -90,6 +91,7 @@ void loop() {
   server.handleClient();
 #if defined(ESP8266)
   MDNS.update();
+  proxyIdleTick();
 #endif
   if (g_wifiChanged) {
     g_wifiChanged = false;

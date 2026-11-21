@@ -9,7 +9,7 @@ const Canvas = {
   },
   reopen() { if (this.spec) { $("app").dataset.canvas = "open"; this.render(); UI.renderTopbar(); } else toast("Nothing to show yet.", "", "Create a deck, report or file, or preview a code block."); },
   close() { $("app").dataset.canvas = "closed"; UI.renderTopbar(); },
-  refresh() { if (this.isOpen() && this.spec && ["deck", "report", "artifact"].includes(this.spec.type)) { const c = Store.chats[this.spec.chatId]; if (!c || !c.nodes[this.spec.nodeId]) this.close(); } },
+  refresh() { if (this.isOpen() && this.spec && ["deck", "report", "artifact", "design"].includes(this.spec.type)) { const c = Store.chats[this.spec.chatId]; if (!c || !c.nodes[this.spec.nodeId]) this.close(); } },
   node() { const c = Store.chats[this.spec.chatId]; return c && c.nodes[this.spec.nodeId]; },
   head(title, actions = "") { return `<div class="cv-head"><b class="grow truncate">${esc(title)}</b>${actions}<button class="icon-btn" data-act="cv-close" aria-label="Close canvas">${ico("x")}</button></div>`; },
   render() {
@@ -20,6 +20,7 @@ const Canvas = {
     else if (s.type === "artifact") this.artifact();
     else if (s.type === "report") this.report();
     else if (s.type === "deck") this.deckStudio();
+    else if (s.type === "design") this.design();
   },
   artifact() {
     const n = this.node(), a = n && n.artifacts[this.spec.index]; if (!a) return this.close();
@@ -31,7 +32,7 @@ const Canvas = {
     else if (a.type === "xlsx") { const sheets = safe(() => JSON.parse(a.preview).sheets, []); body = `<div class="cv-pad">${sheets.map((sh) => `<h3 style="margin:8px 0">${esc(sh.name)}</h3><div class="md"><table><thead><tr>${(sh.columns || []).map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${(sh.rows || []).slice(0, 100).map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`).join("") || '<div class="empty">No preview available.</div>'}</div>`; }
     else body = `<div class="cv-pad"><div class="code"><pre><code>${esc(a.preview)}</code></pre></div></div>`;
     $("canvas").innerHTML = this.head(a.name, dl + `<button class="icon-btn" data-act="cv-copy" aria-label="Copy">${ico("copy")}</button>`) + `<div class="cv-body">${body}</div>`;
-    if (a.type === "html") $("canvas").querySelector("iframe").srcdoc = a.preview;
+    if (a.type === "html") $("canvas").querySelector("iframe").srcdoc = previewDoc(a.preview);
     this.spec.copy = a.preview;
   },
   report() {
@@ -40,7 +41,46 @@ const Canvas = {
     $("canvas").innerHTML = this.head(r.title, `<button class="btn sm" data-act="rp-deeper">${ico("flask", "sm")}Go deeper</button><button class="icon-btn" data-act="rp-export" aria-label="Export" title="Export">${ico("download")}</button>`) + `<div class="cv-body"><div class="cv-doc md"><h1>${esc(r.title)}</h1>${renderMarkdown(n.text, n.sources)}</div><div class="cv-pad col"><b>Sources</b>${srcs}</div></div>`;
   },
 
-  // ---- Presentation studio ----
+
+  // ---- Design viewer: live preview, devices, code, versions, export, refine ----
+  dev: "desktop", tab: "preview",
+  design() {
+    const n = this.node(); if (!n || !n.design) return this.close(); const d = n.design, chat = Store.chats[this.spec.chatId], hist = designHistory(chat), html = d.kind !== "svg";
+    $("canvas").innerHTML = this.head(d.title, `${hist.length > 1 ? `<select class="input" style="width:auto;padding:5px 8px" data-dz-version aria-label="Version">${hist.map((h) => `<option value="${h.nodeId}" ${h.nodeId === n.id ? "selected" : ""}>v${h.v}</option>`).join("")}</select>` : ""}<button class="btn primary sm" data-act="dz-export">${ico("download", "sm")}Export</button>`) +
+      `<div class="dz-bar"><div class="seg"><button data-act="dz-tab" data-v="preview" class="${this.tab === "preview" ? "on" : ""}">Preview</button><button data-act="dz-tab" data-v="code" class="${this.tab === "code" ? "on" : ""}">Code</button></div>
+        ${html ? `<div class="seg" role="group" aria-label="Device">${[["phone", "Phone"], ["tablet", "Tablet"], ["desktop", "Desktop"]].map(([k, l]) => `<button data-act="dz-dev" data-v="${k}" class="${this.dev === k ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
+        <span class="grow"></span><span class="chip ${d.live ? "" : d.issues && d.issues.length ? "warn" : "ok"}" id="dz-status">${d.live ? "Building…" : d.issues && d.issues.length ? d.issues.length + " to check" : "Checks passed"}</span></div>
+      <div class="cv-body dz-body" id="dz-body"></div>
+      <div class="dz-refine"><div class="dz-chips">${["Make it bolder", "More minimal", "Improve mobile layout", "Add subtle animations", "Add a dark mode"].map((t) => `<button data-act="dz-chip" data-t="${esc(t)}">${esc(t)}</button>`).join("")}</div><div class="row"><textarea class="input" id="dz-in" rows="1" placeholder="Ask for a change…" aria-label="Ask for a change"></textarea><button class="send" data-act="dz-send" aria-label="Send change" ${isBusy(chat.id) ? "disabled" : ""}>${ico("send")}</button></div></div>`;
+    $("dz-in").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ACTS["dz-send"](); } });
+    this.drawDesign();
+  },
+  drawDesign(final) {
+    const n = this.node(), body = $("dz-body"); if (!n || !n.design || !body) return; const d = n.design;
+    if (this.tab === "code") { body.innerHTML = `<div class="dz-codewrap"><button class="btn sm dz-copy" data-act="dz-copy">${ico("copy", "sm")}Copy</button><pre class="dz-code"><code>${highlight(d.code, d.kind === "svg" ? "html" : "html")}</code></pre></div>`; return; }
+    if (d.kind === "svg") { body.innerHTML = `<div class="dz-svg">${sanitizeSvg(d.code || "")}</div>`; return; }
+    body.innerHTML = `<div class="dz-stage" id="dz-stage"><div class="dz-scale" id="dz-scale"><div class="dz-frame" id="dz-frame"><iframe title="Design preview" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe></div></div></div>`;
+    $("dz-frame").querySelector("iframe").srcdoc = d.code ? previewDoc(d.code) : "<p style='font:14px system-ui;padding:24px;color:#888'>Waiting for the first lines of code…</p>";
+    this.fitFrame(); if (!this._ro) { this._ro = new ResizeObserver(() => this.fitFrame()); } this._ro.disconnect(); this._ro.observe($("dz-stage"));
+  },
+  fitFrame() {
+    const stage = $("dz-stage"), frame = $("dz-frame"), box = $("dz-scale"); if (!stage || !frame || !box) return;
+    const w = { phone: 390, tablet: 768, desktop: 1280 }[this.dev] || 1280, scale = Math.min(1, (stage.clientWidth - 24) / w), h = Math.max(320, (stage.clientHeight - 24) / scale);
+    box.style.width = w * scale + "px"; box.style.height = h * scale + "px";
+    frame.style.width = w + "px"; frame.style.height = h + "px"; frame.style.transform = `scale(${scale})`;
+  },
+  // Called while code is streaming in (throttled by the caller) and once when finished.
+  liveDesign(nodeId, final) {
+    const s = this.spec; if (!s || s.type !== "design" || s.nodeId !== nodeId || !this.isOpen()) return;
+    const n = this.node(); if (!n || !n.design) return;
+    if (final) return this.design();
+    if (this.tab !== "preview") return;
+    const d = n.design;
+    if (d.kind === "svg") { const b = $("dz-body"); if (b) b.innerHTML = `<div class="dz-svg">${sanitizeSvg(d.code || "")}</div>`; return; }
+    const f = $("dz-frame") && $("dz-frame").querySelector("iframe"); if (f && d.code) f.srcdoc = previewDoc(d.code);
+  },
+
+  // ---- Slide deck studio ----
   deckStudio() {
     const n = this.node(); if (!n || !n.deck) return this.close(); const d = n.deck;
     this.sel = clamp(this.sel, 0, d.slides.length - 1);
@@ -142,3 +182,36 @@ ACTS["rp-export"] = (el) => {
     { label: "PDF (print)", icon: "download", fn: async () => { const css = await fetch("app.css").then((x) => x.text()).catch(() => ""); const f = document.createElement("iframe"); f.style.cssText = "position:fixed;width:0;height:0;border:0;right:0;bottom:0"; document.body.append(f); f.srcdoc = `<!doctype html><style>${css}body{overflow:visible;background:#fff;color:#111;padding:32px;max-width:780px;margin:auto}</style><div class="md"><h1>${esc(r.title)}</h1>${renderMarkdown(n.text, n.sources)}<h2>Sources</h2><ol>${n.sources.map((s) => `<li><a href="${esc(s.url)}">${esc(s.title)}</a></li>`).join("")}</ol></div>`; await new Promise((x) => (f.onload = x)); f.contentWindow.print(); setTimeout(() => f.remove(), 4000); } },
   ], { align: "right" });
 };
+
+ACTS["dz-tab"] = (el) => { Canvas.tab = el.dataset.v; Canvas.design(); };
+ACTS["dz-dev"] = (el) => { Canvas.dev = el.dataset.v; Canvas.design(); };
+ACTS["dz-copy"] = () => { copyText(Canvas.node().design.code); toast("Code copied", "ok", "", 1300); };
+ACTS["dz-chip"] = (el) => { const i = $("dz-in"); i.value = el.dataset.t; i.focus(); };
+ACTS["dz-send"] = () => {
+  const i = $("dz-in"), t = i && i.value.trim(), chat = Store.chats[Canvas.spec.chatId]; if (!t || !chat) return;
+  if (isBusy(chat.id)) return toast("Hold on, the current build is still running.");
+  if (App.chatId !== chat.id) openChat(chat.id);
+  chat.mode = "design"; i.value = ""; startSend(t);
+};
+document.addEventListener("change", (e) => { const t = e.target; if (t.dataset && t.dataset.dzVersion !== undefined && Canvas.spec && Canvas.spec.type === "design") Canvas.show({ type: "design", chatId: Canvas.spec.chatId, nodeId: t.value }, true); });
+ACTS["dz-export"] = (el) => {
+  const n = Canvas.node(), d = n.design, ext = d.kind === "svg" ? "svg" : "html", name = d.file || designFilename(d), items = [
+    { label: `Download .${ext}`, icon: "download", fn: () => download(new Blob([d.code], { type: ext === "svg" ? "image/svg+xml" : "text/html" }), name) },
+    { label: "Copy code", icon: "copy", fn: () => { copyText(d.code); toast("Code copied", "ok", "", 1300); } },
+  ];
+  if (d.kind === "svg") items.push({ label: "Download .png", icon: "image", fn: () => svgToPng(d.code, name.replace(/\.svg$/, ".png")) });
+  else items.push({ label: "Print / save as PDF", icon: "file", fn: () => printDesign(d.code) });
+  items.push({ sep: 1 }, { label: d.stored ? "Stored on the device" : "Save to the device", icon: "cpu", disabled: !!d.stored, fn: async () => { const rec = await buildAndStore({ type: d.kind === "svg" ? "svg" : "html", filename: name, title: d.title, content: d.code }, { download: false }); d.stored = rec.stored; Store.saveChat(Store.chats[Canvas.spec.chatId]); toast(rec.stored ? "Saved to the device" : "Could not save", rec.stored ? "ok" : "bad", rec.storeError); } });
+  openMenu(el, items, { align: "right" });
+};
+// Printing happens in a separate sandboxed frame that is allowed to open the print dialog; it never shares this app's origin.
+function printDesign(code) {
+  const f = document.createElement("iframe"); f.setAttribute("sandbox", "allow-scripts allow-modals"); f.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
+  f.srcdoc = code.replace(/<\/body>\s*<\/html>\s*$/i, "<script>addEventListener('load',()=>setTimeout(()=>print(),400))<\/script></body></html>"); document.body.append(f); setTimeout(() => f.remove(), 60000);
+}
+function svgToPng(svg, filename) {
+  const m = svg.match(/viewBox=["'][\d.\s-]*?([\d.]+)\s+([\d.]+)["']/), w = m ? +m[1] : 1080, h = m ? +m[2] : 1080, img = new Image();
+  img.onload = () => { const c = document.createElement("canvas"); c.width = w; c.height = h; c.getContext("2d").drawImage(img, 0, 0, w, h); c.toBlob((b) => download(b, filename)); };
+  img.onerror = () => toast("The SVG could not be rendered to PNG.", "bad");
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg.replace(/<svg\b/, (t) => (/\swidth=/.test(svg) ? t : t + ` width="${w}" height="${h}"`)));
+}

@@ -83,7 +83,7 @@ void handleKeyPut() {
   if (!parseBody(body)) return;
   const String provider = body["provider"].as<String>();
   if (!knownProvider(provider)) {
-    fail(400, "unsupported_provider", "Choose a supported provider.", "Use OpenAI, Anthropic, Google Gemini, Ollama or a search provider.");
+    fail(400, "unsupported_provider", "Choose a supported provider.", "Use OpenAI, Anthropic, Google Gemini or a search provider.");
     return;
   }
   if (!saveCredential(provider, body["value"].as<String>())) {
@@ -353,10 +353,10 @@ void handleNotFound() {
 void registerApiRoutes(HttpServer& server) {
   api = &server;
 #if defined(ESP32)
-  const char* headers[] = {"X-CE-Provider", "X-CE-Path", "X-CE-Method"};
-  server.collectHeaders(headers, 3);
+  const char* headers[] = {"X-CE-Provider", "X-CE-Path", "X-CE-Method", "X-CE-Timeout"};
+  server.collectHeaders(headers, 4);
 #else
-  server.collectHeaders("X-CE-Provider", "X-CE-Path", "X-CE-Method");
+  server.collectHeaders("X-CE-Provider", "X-CE-Path", "X-CE-Method", "X-CE-Timeout");
 #endif
   server.on("/api/health", HTTP_GET, handleBootstrap);
   server.on("/api/bootstrap", HTTP_GET, handleBootstrap);

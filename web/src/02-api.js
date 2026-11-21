@@ -1,10 +1,10 @@
 // Device API + provider adapters. The ESP32/ESP8266 is a key vault and a thin streaming proxy;
 // every provider-specific request/response mapping lives here, in the browser.
 const PROVIDERS = {
-  openai: { label: "OpenAI", short: "O", color: "#10a37f", kind: "key", note: "GPT and o-series models", keyHint: "sk-..." },
-  anthropic: { label: "Anthropic", short: "A", color: "#d97757", kind: "key", note: "Claude models", keyHint: "sk-ant-..." },
-  google: { label: "Google Gemini", short: "G", color: "#4285f4", kind: "key", note: "Gemini models", keyHint: "AIza..." },
-  ollama: { label: "Ollama", short: "L", color: "#44403c", kind: "url", note: "Models on your LAN", keyHint: "http://192.168.1.20:11434" },
+  openai: { label: "OpenAI", short: "O", color: "#10a37f", kind: "key", note: "Recommended · GPT and o-series models", keyHint: "sk-..." },
+  anthropic: { label: "Anthropic", short: "A", color: "#d97757", kind: "key", note: "Beta · Claude models", keyHint: "sk-ant-..." },
+  google: { label: "Google Gemini", short: "G", color: "#4285f4", kind: "key", note: "Beta · Gemini models", keyHint: "AIza..." },
+  // Ollama support is disabled for now.
 };
 const TOOL_PROVIDERS = {
   tavily: { label: "Tavily search", short: "T", color: "#3b82f6", kind: "key", note: "Optional web search API key", keyHint: "tvly-..." },
@@ -41,10 +41,18 @@ const Dev = {
 
   // Raw proxy call: returns a fetch Response for 2xx, throws ApiError otherwise.
   async proxy(provider, path, opts = {}) {
-    // A busy ESP answers low_memory; wait briefly and retry instead of failing the request.
+    // A busy ESP answers low_memory; wait briefly and retry instead of failing the request. Transient provider trouble (HTTP 5xx such as
+    // "high demand", rate limits, or the device failing to open a connection) is retried a few times too: an Agent run makes many calls
+    // and one hiccup should not end it.
+    const transient = ["provider_unavailable", "rate_limited", "network_unreachable"];
     for (let attempt = 0; ; attempt++) {
       try { return await this._proxy(provider, path, opts); }
-      catch (e) { if (e.code !== "low_memory" || attempt >= 3 || (opts.signal && opts.signal.aborted)) throw e; await sleep(2500); }
+      catch (e) {
+        const mem = e.code === "low_memory", busy = transient.includes(e.code);
+        if (!(mem || busy) || attempt >= (mem ? 4 : 3) || (opts.signal && opts.signal.aborted)) throw e;
+        if (busy && attempt === 0) toast("The provider or network is busy", "", "Retrying automatically.", 3500);
+        await sleep(mem ? 3000 + attempt * 1500 : 4000 * (attempt + 1));
+      }
     }
   },
   async _proxy(provider, path, { method = "POST", body, signal, headers = {} } = {}) {
@@ -59,7 +67,7 @@ const Dev = {
     const text = await res.text().catch(() => "");
     throw upstreamError(res.status, text);
   },
-  modelStatus: {},
+  modelStatus: {}, effortCaps: {},
   // The device handles one upstream request at a time and has little spare memory, so every call that
   // touches the proxy or relay runs through this queue. `pending` lets best-effort calls skip when busy.
   _q: Promise.resolve(), pending: 0,
@@ -109,6 +117,8 @@ const Dev = {
 // Maps a provider/device failure to the same error classes v1 used.
 function upstreamError(status, text) {
   let data = null; try { data = JSON.parse(text); } catch (_) {}
+  // Providers always answer errors with JSON. A bare 404/405 means this address is not a ChatESP device (wrong address or old firmware).
+  if (!data && (status === 404 || status === 405)) return new ApiError("gateway_mismatch", "That address answered, but it doesn't behave like a ChatESP device.", "Check the device address, or reflash the firmware if you updated the web app recently.", status);
   if (data && data.ok === false && data.error) return new ApiError(data.error.code, data.error.message, data.error.hint, status);
   let detail = data && (data.error && (data.error.message || data.error) || data.message) || "";
   if (typeof detail !== "string") detail = JSON.stringify(detail);
@@ -197,23 +207,73 @@ function levelFor(spec, effort) {
 function reasoningFor(provider, model, effort, think, quiet) {
   const spec = reasoningSpec(provider, model); if (!spec) return null;
   if (quiet) return { spec, quiet: true, on: !spec.canDisable, level: spec.levels[0] || "" };
-  return { spec, on: think !== false || !spec.canDisable, level: levelFor(spec, effort) };
+  let level = levelFor(spec, effort);
+  const cap = Dev.effortCaps[provider + "|" + model];  // learned this session: this model used its whole budget thinking at a higher level
+  if (cap && spec.levels.indexOf(cap) >= 0 && spec.levels.indexOf(level) > spec.levels.indexOf(cap)) level = cap;
+  return { spec, on: think !== false || !spec.canDisable, level };
+}
+
+
+// ---- Parameters a model refuses ----
+// Providers differ per model (e.g. reasoning models reject temperature). When one answers 400 naming the offending parameter,
+// drop or adjust it, retry, and remember the choice so the next request is right the first time.
+function dropPath(body, path) {
+  const parts = String(path).split(".");
+  let o = body; for (let i = 0; i < parts.length - 1 && o; i++) o = o[parts[i]];
+  const leaf = parts[parts.length - 1];
+  if (o && typeof o === "object" && leaf in o) { delete o[leaf]; return true; }
+  if (parts.length === 1) for (const c of ["generationConfig", "options"]) if (body[c] && leaf in body[c]) { delete body[c][leaf]; return true; }
+  return false;
+}
+function applyQuirks(provider, model, body) {
+  for (const p of ((Store.settings.quirks || {})[provider + "|" + model] || [])) dropPath(body, p);
+  const cap = (Store.settings.tokenCaps || {})[provider + "|" + model];  // a ceiling learned from an earlier rejection
+  if (cap) { if (body.max_output_tokens > cap) body.max_output_tokens = cap; if (body.max_tokens > cap) body.max_tokens = cap; if (body.generationConfig && body.generationConfig.maxOutputTokens > cap) body.generationConfig.maxOutputTokens = cap; if (body.options && body.options.num_predict > cap) body.options.num_predict = cap; if (body.thinking && body.thinking.budget_tokens >= cap) body.thinking.budget_tokens = Math.max(1024, Math.floor(cap / 2)); }
+}
+function adaptToRejection(provider, model, body, e) {
+  if (e.status !== 400 && e.status !== 422) return false;
+  const msg = (e.message || "") + " " + (e.hint || ""); let m, dropped = null;
+  if ((m = msg.match(/(?:unsupported|unknown|invalid) (?:parameter|field)s?:? '?"?([\w.]+)/i)) || (m = msg.match(/Unknown name "(\w+)"/i)) || (m = msg.match(/'([\w.]+)' is not supported with this model/i)) || (m = msg.match(/Unrecognized request argument supplied: (\w+)/i))) { if (m[1] !== "value" && dropPath(body, m[1])) dropped = m[1]; }
+  if (!dropped && (m = msg.match(/Unsupported value: '([\w.]+)' does not support '([^']+)'/i)) && /effort/.test(m[1]) && body.reasoning) {
+    const i = EFFORT_ORDER.indexOf(body.reasoning.effort); if (i >= 0 && i < EFFORT_ORDER.length - 1) { body.reasoning.effort = EFFORT_ORDER[i + 1]; return true; }
+  }
+  if (!dropped && /temperature/i.test(msg) && /thinking|reasoning|only|not supported|default/i.test(msg) && dropPath(body, "temperature")) dropped = "temperature";
+  if (!dropped && /think/i.test(msg) && /not support|unsupported/i.test(msg) && "think" in body) { delete body.think; dropped = "think"; }
+  if (!dropped && /summary/i.test(msg) && body.reasoning && body.reasoning.summary) { delete body.reasoning.summary; dropped = "reasoning.summary"; }
+  if (!dropped && provider === "openai" && body.reasoning && /effort|reasoning/i.test(msg)) { const i = EFFORT_ORDER.indexOf(body.reasoning.effort); if (i >= 0 && i < EFFORT_ORDER.length - 1) { body.reasoning.effort = EFFORT_ORDER[i + 1]; return true; } }
+  // "max_tokens: 16000 > 8192", "must be less than or equal to 8192", "supported range is from 1 to 8192": lower the cap to what the model allows.
+  if (!dropped && /max[_ ]?(?:output[_ ]?)?tokens|maxOutputTokens|num_predict|output tokens/i.test(msg)) {
+    const nums = ((e.hint || "").match(/\d{3,6}/g) || []).map(Number),  // the provider's own wording only: the status code in e.message is not a ceiling
+      cur = body.max_output_tokens || body.max_tokens || (body.generationConfig && body.generationConfig.maxOutputTokens) || (body.options && body.options.num_predict) || 0;
+    const cap = nums.filter((n) => n < cur).sort((a, b) => b - a)[0];
+    if (cap && cap >= 1000) {
+      if (body.max_output_tokens) body.max_output_tokens = cap; else if (body.max_tokens) body.max_tokens = cap; else if (body.generationConfig && body.generationConfig.maxOutputTokens) body.generationConfig.maxOutputTokens = cap; else if (body.options) body.options.num_predict = cap;
+      if (body.thinking && body.thinking.budget_tokens >= cap) body.thinking.budget_tokens = Math.max(1024, Math.floor(cap / 2));
+      (Store.settings.tokenCaps = Store.settings.tokenCaps || {})[provider + "|" + model] = cap; Store.saveSettings(); return true;
+    }
+  }
+  if (!dropped) return false;
+  const q = (Store.settings.quirks = Store.settings.quirks || {}), k = provider + "|" + model;
+  q[k] = [...new Set([...(q[k] || []), dropped])]; Store.saveSettings(); return true;
 }
 
 // ---- Streaming chat --------------------------------------------------------------------------
 // req: {model, system, messages:[{role:'user'|'assistant', text, images:[{mime,b64}]}], temperature, effort, maxTokens, search}
-async function* readLines(res, signal) {
+// Yields text lines from a streamed response. If nothing at all arrives for `idleMs` the stream is treated as dead
+// (for example the device restarted mid-reply and left the connection half open).
+async function* readLines(res, signal, idleMs = 240000) {
   const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  const stalled = () => new ApiError("stream_stalled", "The device stopped sending data.", "It may have restarted or lost Wi-Fi. Press Retry. If this keeps happening, lower the reasoning effort for this chat.", 504);
   try {
     for (;;) {
-      const { value, done } = await reader.read();
+      let timer; const { value, done } = await Promise.race([reader.read(), new Promise((_, rej) => { timer = setTimeout(() => rej(stalled()), idleMs); })]).finally(() => clearTimeout(timer));
       if (done) break;
       buf += dec.decode(value, { stream: true });
       let i;
       while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).replace(/\r$/, ""); buf = buf.slice(i + 1); yield line; }
     }
     buf += dec.decode(); if (buf.trim()) yield buf;
-  } finally { try { reader.releaseLock(); } catch (_) {} }
+  } finally { try { reader.cancel(); } catch (_) {} try { reader.releaseLock(); } catch (_) {} }
 }
 function mergeTurns(messages) {
   const out = [];
@@ -227,18 +287,22 @@ function mergeTurns(messages) {
 }
 function buildRequest(provider, req) {
   const turns = mergeTurns(req.messages);
+  // Small devices cannot afford minutes of per-token events (each token is ~240 bytes on the wire and the board is down to a few KB
+  // of heap while the TLS session is open), so long replies are fetched in one piece instead. Anthropic needs streaming for long output.
+  const buffered = !!req.buffered && provider !== "anthropic";
   const rz = reasoningFor(provider, req.model, req.effort, req.think, req.quiet);
   const maxTokens = req.maxTokens || Store.settings.maxTokens || 4096;
   if (provider === "openai") {
     const body = {
-      model: req.model, stream: true, store: false, max_output_tokens: maxTokens,
+      model: req.model, ...(buffered ? {} : { stream: true, stream_options: { include_obfuscation: false } }), store: false, max_output_tokens: maxTokens,
       input: turns.map((m) => ({ role: m.role, content: m.role === "assistant" ? [{ type: "output_text", text: m.text }] : [{ type: "input_text", text: m.text }].concat(m.images.map((i) => ({ type: "input_image", image_url: `data:${i.mime};base64,${i.b64}` }))) })),
     };
     if (req.system) body.instructions = req.system;
-    if (rz) body.reasoning = rz.on ? (rz.quiet ? { effort: rz.level } : { effort: rz.level, summary: "auto" }) : { effort: rz.spec.off };
+    // Reasoning summaries stream one tiny event per token (hundreds of KB at high effort): skip them when the caller does not show them.
+    if (rz) body.reasoning = rz.on ? (rz.quiet || req.noSummary ? { effort: rz.level } : { effort: rz.level, summary: "auto" }) : { effort: rz.spec.off };
     else if (req.temperature != null) body.temperature = req.temperature;
     if (req.search) body.tools = [{ type: "web_search" }];
-    return { path: "/v1/responses", body };
+    return { path: "/v1/responses", body, buffered };
   }
   if (provider === "anthropic") {
     const body = { model: req.model, max_tokens: maxTokens, stream: true, messages: turns.map((m) => ({ role: m.role, content: m.images.map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.b64 } })).concat([{ type: "text", text: m.text }]) })) };
@@ -246,43 +310,53 @@ function buildRequest(provider, req) {
     if (rz && rz.on) { const budget = rz.spec.budgets[rz.level]; body.thinking = { type: "enabled", budget_tokens: budget }; body.max_tokens = Math.max(maxTokens, budget + 1024); }
     else if (req.temperature != null) body.temperature = clamp(req.temperature, 0, 1);  // thinking requires the default temperature
     if (req.search) body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }];
-    return { path: "/v1/messages", body };
+    return { path: "/v1/messages", body, buffered: false };
   }
   if (provider === "google") {
     const body = { contents: turns.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: m.images.map((i) => ({ inlineData: { mimeType: i.mime, data: i.b64 } })).concat([{ text: m.text }]) })), generationConfig: { maxOutputTokens: maxTokens } };
     if (req.temperature != null) body.generationConfig.temperature = clamp(req.temperature, 0, 2);
-    if (rz && rz.spec.kind === "budget") { const b = rz.on && !rz.quiet ? rz.spec.budgets[rz.level] : rz.spec.canDisable ? 0 : rz.spec.minBudget; body.generationConfig.thinkingConfig = { thinkingBudget: b, includeThoughts: b > 0 }; body.generationConfig.maxOutputTokens = Math.max(maxTokens, b + 1024); }
-    else if (rz && rz.spec.kind === "glevel") body.generationConfig.thinkingConfig = { thinkingLevel: rz.level, includeThoughts: true };
+    if (rz && rz.spec.kind === "budget") { const b = rz.on && !rz.quiet ? rz.spec.budgets[rz.level] : rz.spec.canDisable ? 0 : rz.spec.minBudget; body.generationConfig.thinkingConfig = { thinkingBudget: b, includeThoughts: b > 0 && !req.noSummary }; body.generationConfig.maxOutputTokens = Math.max(maxTokens, b + 1024); }
+    else if (rz && rz.spec.kind === "glevel") body.generationConfig.thinkingConfig = { thinkingLevel: rz.level, includeThoughts: !req.noSummary };
     if (req.system) body.systemInstruction = { parts: [{ text: req.system }] };
     if (req.search) body.tools = [{ google_search: {} }];
-    return { path: `/v1beta/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse`, body };
+    return { path: `/v1beta/models/${encodeURIComponent(req.model)}:${buffered ? "generateContent" : "streamGenerateContent?alt=sse"}`, body, buffered };
   }
-  const body = { model: req.model, stream: true, options: { num_predict: maxTokens }, messages: [] };
+  const body = { model: req.model, stream: !buffered, options: { num_predict: maxTokens }, messages: [] };
   if (req.temperature != null) body.options.temperature = clamp(req.temperature, 0, 2);
   if (rz) body.think = rz.spec.kind === "olevel" ? rz.level : rz.on;
   if (req.system) body.messages.push({ role: "system", content: req.system });
   turns.forEach((m) => body.messages.push({ role: m.role, content: m.text, ...(m.images.length ? { images: m.images.map((i) => i.b64) } : {}) }));
-  return { path: "/api/chat", body };
+  return { path: "/api/chat", body, buffered };
 }
 
-function streamChat(provider, req, cb = {}, signal) { return Dev.serial(() => streamChatNow(provider, req, cb, signal)); }
+async function streamChat(provider, req, cb = {}, signal) {
+  try { return await Dev.serial(() => streamChatNow(provider, req, cb, signal)); }
+  catch (e) {
+    // The model used its entire output budget on reasoning and wrote nothing: try once more with lighter reasoning and more room.
+    if (e && e.code === "provider_empty_response" && !req.__lowered) {
+      const rz = reasoningFor(provider, req.model, req.effort, req.think, req.quiet), i = rz && rz.on && !rz.quiet ? rz.spec.levels.indexOf(rz.level) : -1;
+      if (i > 0) { toast("The model spent its whole budget thinking", "", `Retrying with ${rz.spec.levels[i - 1]} reasoning and more room.`, 4500); const res = await streamChat(provider, { ...req, effort: rz.spec.levels[i - 1], maxTokens: Math.min(64000, Math.round((req.maxTokens || 4096) * 1.5)), __lowered: true }, cb, signal); Dev.effortCaps[provider + "|" + req.model] = rz.spec.levels[i - 1]; return res; }
+    }
+    throw e;
+  }
+}
 async function streamChatNow(provider, req, cb = {}, signal) {
-  const { path, body } = buildRequest(provider, req);
+  const { path, body, buffered } = buildRequest(provider, req);
   const bytes = JSON.stringify(body).length;
   if (bytes > Dev.limits.bodyBytes) throw new ApiError("request_too_large", `This request is ${fmtBytes(bytes)}; this device accepts up to ${fmtBytes(Dev.limits.bodyBytes)}.`, "Shorten the conversation, start a new chat, or attach smaller files.", 413);
+  applyQuirks(provider, req.model, body);
   let res;
   for (let attempt = 0; ; attempt++) {
-    try { res = await Dev.proxy(provider, path, { body, signal }); break; }
-    catch (e) {
-      // Newer or older OpenAI models reject some reasoning values; step to the next supported setting once or twice.
-      if (provider !== "openai" || !body.reasoning || e.status !== 400 || attempt >= 2 || !/effort|reasoning|summary/i.test(e.message + " " + e.hint)) throw e;
-      if (/summary/i.test(e.message + " " + e.hint) && body.reasoning.summary) delete body.reasoning.summary;
-      else { const i = EFFORT_ORDER.indexOf(body.reasoning.effort); if (i < 0 || i >= EFFORT_ORDER.length - 1) throw e; body.reasoning.effort = EFFORT_ORDER[i + 1]; }
-    }
+    try { res = await Dev.proxy(provider, path, { body, signal, headers: buffered ? { "X-CE-Timeout": "600" } : {} }); break; }
+    catch (e) { if (attempt >= 4 || !adaptToRejection(provider, req.model, body, e)) throw e; }  // the provider refused a parameter: adjust and retry
   }
   let text = "", usage = null; const sources = [];
-  try { return await readStream(provider, req, res, body, cb, signal, sources, (t, u) => { text = t; usage = u; }); }
-  catch (e) { if (text) Store.addUsage(provider, req.model, estimateTokens(JSON.stringify(body)), estimateTokens(text), true); throw e; }
+  try { return await (buffered ? readBuffered(provider, req, res, body, cb, sources) : readStream(provider, req, res, body, cb, signal, sources, (t, u) => { text = t; usage = u; })); }
+  catch (e) {
+    if (text) Store.addUsage(provider, req.model, estimateTokens(JSON.stringify(body)), estimateTokens(text), true);
+    if (e && e.name !== "AbortError" && !(e instanceof ApiError)) throw new ApiError("stream_interrupted", "The connection dropped in the middle of the reply.", text ? "The part that arrived is kept below. Press Continue to pick up where it stopped, or Retry. Frequent drops usually mean a weak Wi-Fi link to the device." : "Press Retry. Frequent drops usually mean a weak Wi-Fi link to the device.", 502);
+    throw e;
+  }
 }
 async function readStream(provider, req, res, body, cb, signal, sources, report) {
   let text = "", usage = null;
@@ -329,6 +403,39 @@ async function readStream(provider, req, res, body, cb, signal, sources, report)
   Store.addUsage(provider, req.model, u.input || 0, u.output || 0, est);
   return { text, usage: usage || { ...u, est: true }, sources };
 }
+// Reads a whole (non-streamed) reply and hands it to the callbacks in one piece, producing the same result as readStream.
+async function readBuffered(provider, req, res, body, cb, sources) {
+  const j = await res.json().catch(() => null);
+  if (!j) throw new ApiError("provider_request_failed", "The provider returned an unreadable reply.", "Retry.", 502);
+  const addSource = (title, url) => { if (url && !sources.some((s) => s.url === url)) { const s = { title: title || url, url }; sources.push(s); cb.onSource && cb.onSource(s); } };
+  let text = "", think = "", usage = null;
+  if (provider === "openai") {
+    if (j.error) throw new ApiError("provider_request_failed", j.error.message || "The model run failed.", "Try another model or retry.", 502);
+    for (const item of j.output || []) {
+      if (item.type === "message") for (const c of item.content || []) { if (c.type === "output_text") { text += c.text || ""; (c.annotations || []).forEach((a) => a.type === "url_citation" && addSource(a.title, a.url)); } }
+      else if (item.type === "reasoning") (item.summary || []).forEach((p) => { if (p.text) think += p.text; });
+    }
+    if (j.usage) usage = { input: j.usage.input_tokens, output: j.usage.output_tokens };
+    if (!text.trim() && j.status === "incomplete") throw new ApiError("provider_empty_response", "The model stopped before writing text.", "Raise the token limit in Settings or retry.", 502);
+  } else if (provider === "google") {
+    if (j.error) throw new ApiError("provider_request_failed", j.error.message || "The model run failed.", "Retry.", 502);
+    const c = j.candidates && j.candidates[0];
+    if (c && c.content) for (const p of c.content.parts || []) { if (p.text) { if (p.thought) think += p.text; else text += p.text; } }
+    if (c && c.groundingMetadata) (c.groundingMetadata.groundingChunks || []).forEach((g) => g.web && addSource(g.web.title, g.web.uri));
+    if (j.usageMetadata) usage = { input: j.usageMetadata.promptTokenCount || 0, output: j.usageMetadata.candidatesTokenCount || 0 };
+    if (!text.trim() && c && c.finishReason === "MAX_TOKENS") throw new ApiError("provider_empty_response", "The model stopped before writing text.", "Raise the token limit in Settings or retry.", 502);
+  } else {
+    if (j.error) throw new ApiError("provider_request_failed", String(j.error), "Check the model is pulled on the Ollama host.", 502);
+    text = (j.message && j.message.content) || ""; think = (j.message && j.message.thinking) || "";
+    usage = { input: j.prompt_eval_count || 0, output: j.eval_count || 0 };
+  }
+  if (think && cb.onThink) cb.onThink(think);
+  if (text && cb.onText) cb.onText(text);
+  if (!text.trim()) throw new ApiError("provider_empty_response", "The provider returned no text.", "Choose another model or retry.", 502);
+  const est = !usage, u = usage || { input: estimateTokens(JSON.stringify(body)), output: estimateTokens(text) };
+  Store.addUsage(provider, req.model, u.input || 0, u.output || 0, est);
+  return { text, usage: usage || { ...u, est: true }, sources };
+}
 async function completeText(provider, req, signal) { return (await streamChat(provider, req, {}, signal)).text; }
 
 // Image generation (OpenAI gpt-image-1 or a Gemini image model). Returns a data URL.
@@ -355,6 +462,13 @@ async function generateImageNow(provider, prompt, signal) {
 const stripHtml = (s) => String(s || "").replace(/<[^>]+>/g, " ").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
 function relayFetch(url, signal) { return Dev.serial(() => relayFetchNow(url, signal)); }
 async function relayFetchNow(url, signal) {
+  // A busy ESP answers low_memory; wait briefly and retry, like the proxy does.
+  for (let attempt = 0; ; attempt++) {
+    try { return await relayFetchOnce(url, signal); }
+    catch (e) { if (e.code !== "low_memory" || attempt >= 4 || (signal && signal.aborted)) throw e; await sleep(3000 + attempt * 1500); }
+  }
+}
+async function relayFetchOnce(url, signal) {
   let res;
   try { res = await fetch("/api/fetch?url=" + encodeURIComponent(url), { signal }); } catch (e) { if (e.name === "AbortError") throw e; throw new ApiError("gateway_unreachable", "Could not reach ChatESP.", "Check the device connection."); }
   const text = await res.text();

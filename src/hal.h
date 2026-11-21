@@ -13,6 +13,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 using HttpServer = WebServer;
+inline void releaseRequestBody(HttpServer&) {}  // the ESP32 has plenty of heap
 constexpr const char* CE_CHIP = "ESP32";
 // Largest request body accepted by /api/proxy. Bounded by free heap during TLS (~40 KB for the session).
 constexpr size_t CE_BODY_LIMIT = 40000;
@@ -24,11 +25,23 @@ constexpr uint32_t CE_MIN_HEAP_FOR_TLS = 70000;
 #include <ESP8266mDNS.h>
 #include <Updater.h>
 #include <WiFiClientSecure.h>
-using HttpServer = ESP8266WebServer;
+// The raw POST body can be several KB and the web server keeps it alive until the handler returns. For a long streamed
+// reply that is heap the TLS session and the Wi-Fi driver need, so let the proxy free it once it has been forwarded.
+class HttpServerEx : public ESP8266WebServer {
+ public:
+  using ESP8266WebServer::ESP8266WebServer;
+  void releaseBody() {
+    for (int i = 0; i < _currentArgCount; ++i) {
+      if (_currentArgs[i].key == "plain") _currentArgs[i].value = String();  // move-assign frees the buffer
+    }
+  }
+};
+using HttpServer = HttpServerEx;
+inline void releaseRequestBody(HttpServer& server) { server.releaseBody(); }
 constexpr const char* CE_CHIP = "ESP8266";
 constexpr size_t CE_BODY_LIMIT = 6000;
 constexpr size_t CE_FETCH_LIMIT = 16000;
-constexpr uint32_t CE_MIN_HEAP_FOR_TLS = 30000;
+constexpr uint32_t CE_MIN_HEAP_FOR_TLS = 28000;
 #else
 #error "ChatESP supports ESP32 and ESP8266 only"
 #endif

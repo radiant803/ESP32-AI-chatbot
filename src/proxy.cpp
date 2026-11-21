@@ -7,8 +7,8 @@
 namespace {
 
 constexpr uint32_t CONNECT_TIMEOUT_MS = 12000;
-constexpr uint32_t HEADER_TIMEOUT_MS = 45000;
-constexpr uint32_t STREAM_IDLE_MS = 120000;  // reasoning models can be silent for a long time
+constexpr uint32_t HEADER_TIMEOUT_MS = 90000;
+constexpr uint32_t STREAM_IDLE_MS = 300000;  // high-effort reasoning can stay silent for minutes; the browser's Stop button ends it sooner
 constexpr size_t CHUNK_BYTES = 512;
 constexpr size_t MAX_PATH_BYTES = 400;
 
@@ -41,7 +41,6 @@ const char* const ANTHROPIC_PATHS[] = {"/v1/messages", "/v1/models", nullptr};
 const char* const GOOGLE_PATHS[] = {"/v1beta/models", nullptr};
 const char* const TAVILY_PATHS[] = {"/search", nullptr};
 const char* const BRAVE_PATHS[] = {"/res/v1/web/search", nullptr};
-const char* const OLLAMA_PATHS[] = {"/api/chat", "/api/tags", "/api/generate", "/api/show", nullptr};
 const char* const SEARX_PATHS[] = {"/search", nullptr};
 
 const Endpoint ENDPOINTS[] = {
@@ -50,7 +49,6 @@ const Endpoint ENDPOINTS[] = {
     {"google", "generativelanguage.googleapis.com", "x-goog-api-key", "", "", GOOGLE_PATHS},
     {"tavily", "api.tavily.com", "Authorization", "Bearer ", "", TAVILY_PATHS},
     {"brave", "api.search.brave.com", "X-Subscription-Token", "", "", BRAVE_PATHS},
-    {"ollama", nullptr, nullptr, "", "", OLLAMA_PATHS},
     {"searxng", nullptr, nullptr, "", "", SEARX_PATHS},
 };
 
@@ -109,7 +107,7 @@ bool buildTarget(const Endpoint& endpoint, const String& credential, Target& tar
   return true;
 }
 
-bool readLine(WiFiClient& client, String& line, uint32_t timeoutMs) {
+bool readLine(WiFiClient& client, String& line, uint32_t timeoutMs, const std::function<bool()>& abortWait = nullptr) {
   line = "";
   const uint32_t deadline = millis() + timeoutMs;
   while (millis() < deadline) {
@@ -123,6 +121,7 @@ bool readLine(WiFiClient& client, String& line, uint32_t timeoutMs) {
       if (line.length() < 400) line += static_cast<char>(c);
     }
     if (!client.connected() && !client.available()) return false;
+    if (abortWait && abortWait()) return false;  // e.g. the browser pressed Stop: stop waiting on the provider
     delay(1);
   }
   return false;
@@ -134,15 +133,18 @@ std::unique_ptr<WiFiClient> makeClient(bool tls, const String& host, uint16_t po
   secure->setInsecure();
 #if defined(ESP8266)
   // BearSSL fails the connection (error 6) when a TLS record is larger than the receive buffer, and cloud APIs send
-  // records up to 16 KB. Use the full size when memory allows; the transmit side only ever sends small requests.
-  secure->setBufferSizes(halFreeHeap() > 28000 ? 16384 : 4096, 512);
+  // records up to 16 KB (a full record needs 16384 plus 325 bytes of overhead). Use the full size when memory allows; the transmit side only ever sends small requests.
+  secure->setBufferSizes(16709, 512);  // 16709 = BR_SSL_BUFSIZE_INPUT: room for a maximum-size record plus its header and MAC
 #endif
   return std::unique_ptr<WiFiClient>(secure.release());
 }
 
+String tlsError(Upstream& up);
+
 // Opens the upstream connection and reads the response headers. On failure returns false and fills code/message.
 bool upstreamOpen(Upstream& up, const Target& target, const char* method, const String& path, const String& body,
-                  const String& extraHeaders, String& code, String& message, uint32_t headerTimeout = HEADER_TIMEOUT_MS) {
+                  const String& extraHeaders, String& code, String& message, uint32_t headerTimeout = HEADER_TIMEOUT_MS,
+                  const std::function<void()>& afterSend = nullptr, const char* bodyFile = nullptr, const std::function<bool()>& abortWait = nullptr) {
   if (WiFi.status() != WL_CONNECTED) {
     code = "network_unreachable";
     message = "The device is not connected to Wi-Fi.";
@@ -150,48 +152,96 @@ bool upstreamOpen(Upstream& up, const Target& target, const char* method, const 
   }
 #if defined(ESP8266)
   // BearSSL allocates one contiguous receive buffer; fragmentation can leave plenty of heap but no big enough block.
-  const bool tooLittle = target.tls && (halFreeHeap() < CE_MIN_HEAP_FOR_TLS || ESP.getMaxFreeBlockSize() < 22000);
+  const bool tooLittle = target.tls && (halFreeHeap() < CE_MIN_HEAP_FOR_TLS || ESP.getMaxFreeBlockSize() < 17500);
 #else
   const bool tooLittle = target.tls && halFreeHeap() < CE_MIN_HEAP_FOR_TLS;
 #endif
   if (tooLittle) {
     code = "low_memory";
     message = "The device is low on memory (" + String(halFreeHeap() / 1024) + " KB free). Retry in a moment.";
+#if defined(ESP8266)
+    Serial.printf("[proxy] low_memory heap=%u maxblock=%u\n", (unsigned)halFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize());
+#endif
     return false;
   }
-  up.client = makeClient(target.tls, target.host, target.port);
-  up.tls = target.tls;
+  // Resolve first so a DNS failure is reported as one (and cached for the connect below), then connect; one retry covers a transient failure.
+  bool connected = false;
+  for (int attempt = 0; attempt < 2 && !connected; ++attempt) {
+    IPAddress resolved;
+    if (!WiFi.hostByName(target.host.c_str(), resolved)) {
+      Serial.printf("[proxy] dns failed host=%s heap=%u\n", target.host.c_str(), (unsigned)halFreeHeap());
+      code = "network_unreachable";
+      message = "The device could not look up " + target.host + " (DNS failed). Check the router's DNS or Wi-Fi.";
+      delay(400);
+      continue;
+    }
+    up.client = makeClient(target.tls, target.host, target.port);
+    up.tls = target.tls;
 #if defined(ESP8266)
-  up.client->setTimeout(CONNECT_TIMEOUT_MS);
-  const bool connected = up.client->connect(target.host.c_str(), target.port);
+    up.client->setTimeout(CONNECT_TIMEOUT_MS);
+    connected = up.client->connect(target.host.c_str(), target.port);
 #else
-  const bool connected = up.client->connect(target.host.c_str(), target.port, CONNECT_TIMEOUT_MS);
+    connected = up.client->connect(target.host.c_str(), target.port, CONNECT_TIMEOUT_MS);
 #endif
-  if (!connected) {
-    code = "network_unreachable";
-    message = "The device could not connect to " + target.host + " (DNS, TLS or network).";
-    return false;
+    if (!connected) {
+      const String why = target.tls ? tlsError(up) : String("tcp");
+      Serial.printf("[proxy] connect failed host=%s attempt=%d heap=%u block=%u err=%s\n", target.host.c_str(), attempt + 1, (unsigned)halFreeHeap(),
+#if defined(ESP8266)
+                    (unsigned)ESP.getMaxFreeBlockSize(),
+#else
+                    (unsigned)0,
+#endif
+                    why.c_str());
+      code = "network_unreachable";
+      message = "The device could not connect to " + target.host + " (" + why + ", " + String(halFreeHeap() / 1024) + " KB free).";
+      up.client->stop();
+      up.client.reset();
+      delay(400);
+    }
+  }
+  if (!connected) return false;
+  // On the ESP8266 a large request body is parked in flash so it need not sit in RAM while the TLS buffers are allocated.
+  File spill;
+  size_t bodyLen = body.length();
+  if (bodyFile) {
+    spill = LittleFS.open(bodyFile, "r");
+    bodyLen = spill ? spill.size() : 0;
   }
   String request;
   request.reserve(400);
   request += String(method) + " " + path + " HTTP/1.0\r\nHost: " + target.host;
   if ((target.tls && target.port != 443) || (!target.tls && target.port != 80)) request += ":" + String(target.port);
   request += "\r\nConnection: close\r\nAccept: */*\r\nAccept-Encoding: identity\r\n" + target.headers + extraHeaders;
-  if (body.length() || strcmp(method, "POST") == 0) request += "Content-Type: application/json\r\nContent-Length: " + String(body.length()) + "\r\n";
+  if (bodyLen || strcmp(method, "POST") == 0) request += "Content-Type: application/json\r\nContent-Length: " + String(bodyLen) + "\r\n";
   request += "\r\n";
   up.client->print(request);
-  for (size_t sent = 0; sent < body.length();) {
-    const size_t n = min<size_t>(1024, body.length() - sent);
-    if (up.client->write(reinterpret_cast<const uint8_t*>(body.c_str()) + sent, n) != n) {
-      code = "network_unreachable";
-      message = "The connection dropped while sending the request.";
-      return false;
+  if (bodyFile) {
+    uint8_t chunk[512];
+    while (spill && spill.available()) {
+      const size_t n = spill.read(chunk, sizeof(chunk));
+      if (!n || up.client->write(chunk, n) != n) {
+        code = "network_unreachable";
+        message = "The connection dropped while sending the request.";
+        return false;
+      }
+      yield();
     }
-    sent += n;
-    yield();
+    spill.close();
+  } else {
+    for (size_t sent = 0; sent < body.length();) {
+      const size_t n = min<size_t>(1024, body.length() - sent);
+      if (up.client->write(reinterpret_cast<const uint8_t*>(body.c_str()) + sent, n) != n) {
+        code = "network_unreachable";
+        message = "The connection dropped while sending the request.";
+        return false;
+      }
+      sent += n;
+      yield();
+    }
   }
+  if (afterSend) afterSend();  // the request is on the wire: let the caller free what it no longer needs
   String line;
-  if (!readLine(*up.client, line, headerTimeout) || !line.startsWith("HTTP/")) {
+  if (!readLine(*up.client, line, headerTimeout, abortWait) || !line.startsWith("HTTP/")) {
     code = "provider_timeout";
     message = "The provider did not answer in time.";
     return false;
@@ -254,7 +304,9 @@ void upstreamStream(HttpServer& server, Upstream& up, const String& contentType,
   bool browserGone = false;
   const char* reason = "idle-timeout";
   uint32_t lastData = millis();
+  uint32_t minHeap = halFreeHeap();
   while (millis() - lastData < STREAM_IDLE_MS) {
+    if (halFreeHeap() < minHeap) minHeap = halFreeHeap();
     const int available = up.client->available();
     if (available > 0) {
       const int n = up.client->read(buffer, min<size_t>(available, sizeof(buffer)));
@@ -281,10 +333,25 @@ void upstreamStream(HttpServer& server, Upstream& up, const String& contentType,
     }
     yield();
   }
-  Serial.printf("[proxy] status=%d sent=%u end=%s tls=%s heap=%u\n", up.status, static_cast<unsigned>(total), reason, tlsError(up).c_str(), halFreeHeap());
+  Serial.printf("[proxy] status=%d sent=%u end=%s tls=%s heap=%u min=%u\n", up.status, static_cast<unsigned>(total), reason, tlsError(up).c_str(), halFreeHeap(), minHeap);
   if (!browserGone) writeAll(browser, reinterpret_cast<const uint8_t*>("0\r\n\r\n"), 5);
   up.client->stop();
 }
+
+// The mDNS responder allocates when a neighbour multicasts a query (a Mac does this constantly). During a TLS stream the heap
+// is only a few KB, so that allocation throws OOM and reboots the board. Stop it for the length of a proxy call; proxyIdleTick()
+// brings it back only after the board has been idle with plenty of heap, so each TLS session starts with the most memory possible.
+static bool g_mdnsOff = false;
+static uint32_t g_lastProxyMs = 0;
+struct MdnsPause {
+  MdnsPause() {
+#if defined(ESP8266)
+    if (!g_mdnsOff) { MDNS.end(); g_mdnsOff = true; }
+    g_lastProxyMs = millis();
+#endif
+  }
+  ~MdnsPause() { g_lastProxyMs = millis(); }
+};
 
 }  // namespace
 
@@ -335,9 +402,35 @@ void handleProxy(HttpServer& server) {
     upstreamFailure(server, code, "No credential is saved for " + String(providerLabel(provider)) + ".");
     return;
   }
-  Upstream up;
+  MdnsPause quietNetwork;
+  // A non-streamed reply sends nothing until the model has finished, so the browser may ask for a longer wait (seconds, max 10 minutes).
+  const long askedWait = server.header("X-CE-Timeout").toInt();
+  const uint32_t headerWait = askedWait > 0 ? static_cast<uint32_t>(min<long>(askedWait, 600)) * 1000UL : HEADER_TIMEOUT_MS;
   const char* upstreamMethod = method == "GET" ? "GET" : "POST";
-  if (!upstreamOpen(up, target, upstreamMethod, path, method == "GET" ? String() : body, "", code, message)) {
+  const char* spillPath = nullptr;
+#if defined(ESP8266)
+  // The raw body is the biggest single thing in RAM when the TLS session starts. Park it in flash, free it, and stream it from there.
+  static const char* const SPILL = "/.chatesp-req.tmp";
+  if (upstreamMethod[0] == 'P' && body.length() > 1200) {
+    File f = LittleFS.open(SPILL, "w");
+    if (f) {
+      const bool ok = f.write(reinterpret_cast<const uint8_t*>(body.c_str()), body.length()) == body.length();
+      f.close();
+      if (ok) {
+        spillPath = SPILL;
+        releaseRequestBody(server);
+      } else {
+        LittleFS.remove(SPILL);
+      }
+    }
+  }
+#endif
+  Upstream up;
+  const bool opened = upstreamOpen(up, target, upstreamMethod, path, method == "GET" || spillPath ? String() : body, "", code, message, headerWait, [&server]() { releaseRequestBody(server); }, spillPath, [&server]() { return !server.client().connected(); });
+#if defined(ESP8266)
+  if (spillPath) LittleFS.remove(spillPath);
+#endif
+  if (!opened) {
     upstreamFailure(server, code, message);
     return;
   }
@@ -355,6 +448,7 @@ void handleCredentialTest(HttpServer& server, const String& provider, const Stri
   Target target;
   String code, message, path = "/v1/models";
   buildTarget(*endpoint, value, target, code);
+  MdnsPause quietNetwork;
   const char* method = "GET";
   String body;
   if (provider == "anthropic") path = "/v1/models?limit=100";
@@ -376,6 +470,7 @@ void handleCredentialTest(HttpServer& server, const String& provider, const Stri
 }
 
 void handleFetchRelay(HttpServer& server) {
+  MdnsPause quietNetwork;
   String url = server.arg("url");
   for (int hop = 0; hop < 4; ++hop) {
     if (!(url.startsWith("http://") || url.startsWith("https://")) || url.length() > 500 || url.indexOf(' ') >= 0) {
@@ -416,4 +511,13 @@ void handleFetchRelay(HttpServer& server) {
     return;
   }
   sendApiError(server, 502, "fetch_redirects", "Too many redirects.", "Try a different source.");
+}
+
+void proxyIdleTick() {
+#if defined(ESP8266)
+  if (g_mdnsOff && millis() - g_lastProxyMs > 15000 && halFreeHeap() > 33000 && MDNS.begin("chatesp")) {
+    MDNS.addService("http", "tcp", 80);
+    g_mdnsOff = false;
+  }
+#endif
 }

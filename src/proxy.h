@@ -14,3 +14,6 @@ void handleCredentialTest(HttpServer& server, const String& provider, const Stri
 
 // GET /api/fetch?url=...: public web page relay for research mode (blocks private addresses).
 void handleFetchRelay(HttpServer& server);
+
+// Call from loop(): brings mDNS (chatesp.local) back after proxy traffic once the board has been idle with plenty of heap.
+void proxyIdleTick();

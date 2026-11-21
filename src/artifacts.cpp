@@ -11,7 +11,7 @@ constexpr const char* BACKUP_ARTIFACT = "/.chatesp-upload.bak";
 bool allowedExtension(const String& name) {
   String lower = name;
   lower.toLowerCase();
-  for (const char* ext : {".txt", ".md", ".csv", ".json", ".html", ".js", ".ts", ".py", ".cpp", ".h", ".docx", ".pptx", ".xlsx"}) {
+  for (const char* ext : {".txt", ".md", ".csv", ".json", ".html", ".svg", ".js", ".ts", ".py", ".cpp", ".h", ".docx", ".pptx", ".xlsx"}) {
     if (lower.endsWith(ext)) return true;
   }
   return false;
@@ -48,6 +48,7 @@ String artifactMimeType(const String& name) {
   if (lower.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   if (lower.endsWith(".json")) return "application/json";
   if (lower.endsWith(".html")) return "text/html; charset=utf-8";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
   if (lower.endsWith(".csv")) return "text/csv; charset=utf-8";
   if (lower.endsWith(".js") || lower.endsWith(".ts")) return "text/javascript; charset=utf-8";
   return "text/plain; charset=utf-8";

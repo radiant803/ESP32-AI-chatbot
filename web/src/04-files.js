@@ -9,7 +9,7 @@ const MIME = {
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 };
-const TEXT_EXT = /\.(txt|md|csv|json|html|js|ts|py|cpp|h)$/i;
+const TEXT_EXT = /\.(txt|md|csv|json|html|svg|js|ts|py|cpp|h)$/i;
 const MAX_ARTIFACT = 700 * 1024;
 
 function artifactKind(name) { const m = String(name).toLowerCase().match(/\.(\w+)$/); return m ? m[1] : "file"; }
@@ -25,8 +25,8 @@ function fileIcon(name, cls = "") { const k = artifactKind(name); return `<span 
 function validateSpec(spec) {
   if (!spec || typeof spec !== "object") throw new ApiError("artifact_invalid", "The model did not describe a file.", "Try rephrasing the request.");
   const type = String(spec.type || "").toLowerCase();
-  if (!["text", "code", "docx", "xlsx", "pptx", "html"].includes(type)) throw new ApiError("artifact_invalid", "Unsupported file type: " + type, "Ask for a document, presentation, spreadsheet, text or code file.");
-  const ext = { docx: "docx", pptx: "pptx", xlsx: "xlsx", html: "html", text: "txt", code: "txt" }[type];
+  if (!["text", "code", "docx", "xlsx", "pptx", "html", "svg"].includes(type)) throw new ApiError("artifact_invalid", "Unsupported file type: " + type, "Ask for a document, presentation, spreadsheet, text or code file.");
+  const ext = { docx: "docx", pptx: "pptx", xlsx: "xlsx", html: "html", svg: "svg", text: "txt", code: "txt" }[type];
   let filename = safeFilename(spec.filename || spec.title, ext);
   if (MIME[type] && !filename.toLowerCase().endsWith("." + type)) filename = filename.replace(/\.\w+$/, "") + "." + type;
   if (!MIME[type] && !TEXT_EXT.test(filename)) filename = filename.replace(/\.\w+$/, "") + "." + ext;
@@ -34,9 +34,9 @@ function validateSpec(spec) {
 }
 async function composeArtifact(spec) {
   spec = validateSpec(spec);
-  if (spec.type === "text" || spec.type === "code" || spec.type === "html") {
+  if (spec.type === "text" || spec.type === "code" || spec.type === "html" || spec.type === "svg") {
     const content = typeof spec.content === "string" && spec.content ? spec.content : (spec.sections || []).map((s) => `${s.heading || ""}\n${s.text || ""}`.trim()).join("\n\n") || spec.title || "";
-    return { blob: new Blob([content], { type: spec.type === "html" ? "text/html;charset=utf-8" : "text/plain;charset=utf-8" }), spec };
+    return { blob: new Blob([content], { type: spec.type === "html" ? "text/html;charset=utf-8" : spec.type === "svg" ? "image/svg+xml" : "text/plain;charset=utf-8" }), spec };
   }
   if (spec.type === "docx") {
     await loadScript(LIBS.docx); const D = window.docx;
@@ -79,7 +79,7 @@ async function buildAndStore(spec, { download: dl = true } = {}) {
   return { name: s.filename, type: s.type, size: blob.size, stored, storeError, title: s.title || s.filename, preview: previewFor(s), deck: s.type === "pptx" ? (s.deck || null) : null, ts: Date.now() };
 }
 function previewFor(s) {
-  if (s.type === "text" || s.type === "code" || s.type === "html") return String(s.content || "").slice(0, 60000);
+  if (s.type === "text" || s.type === "code" || s.type === "html" || s.type === "svg") return String(s.content || "").slice(0, 60000);
   if (s.type === "docx") return s.markdown || sectionsToMarkdown(s.sections);
   if (s.type === "xlsx") return JSON.stringify({ sheets: s.sheets || [] });
   return "";
@@ -123,7 +123,7 @@ function slideHTML(sl, th, i, n) {
   if (L === "title" || L === "section" || L === "closing") inner = `<h2>${esc(sl.title)}</h2>${sl.subtitle ? `<div class="st">${esc(sl.subtitle)}</div>` : ""}`;
   else if (L === "quote") inner = `<blockquote>${esc(sl.quote || sl.title)}${sl.attribution ? `<div class="st">${esc(sl.attribution)}</div>` : ""}</blockquote>`;
   else if (L === "two-column") inner = `<h2>${esc(sl.title)}</h2><div class="cols">${ul(sl.left)}${ul(sl.right)}</div>`;
-  else if (L === "image-text") inner = `<h2>${esc(sl.title)}</h2><div class="cols">${ul(sl.bullets)}<div style="display:grid;place-items:center">${sl.image ? `<img class="pic" alt="" src="${esc(sl.image)}">` : `<div class="st" style="text-align:center;opacity:.7">${esc(sl.imagePrompt || "Image")}</div>`}</div></div>`;
+  else if (L === "image-text") inner = `<h2>${esc(sl.title)}</h2><div class="cols">${ul(sl.bullets)}<div style="display:grid;place-items:center">${sl.image ? `<img class="pic" alt="" src="${esc(sl.image)}">` : `<div class="pic-ph"><b>Image</b><small>Add one in the editor</small></div>`}</div></div>`;
   else if (L === "chart") inner = `<h2>${esc(sl.title)}</h2><div class="chartbox">${sl.chart ? chartSvg(sl.chart, th) : ""}</div>${(sl.bullets || []).length ? ul(sl.bullets.slice(0, 3)) : ""}`;
   else inner = `<h2>${esc(sl.title)}</h2>${ul(sl.bullets)}`;
   const vars = `--sl-bg:${th.bg};--sl-ink:${th.ink};--sl-head:${th.head};--sl-mute:${th.mute};--sl-accent:${th.accent};--sl-font:${th.font}`;

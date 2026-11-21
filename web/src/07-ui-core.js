@@ -86,6 +86,7 @@ const UI = {
         <textarea id="prompt" rows="1" placeholder="Message ChatESP" aria-label="Message"></textarea>
         <div class="bar"><button class="icon-btn" data-act="attach-menu" aria-label="Add" title="Add files and tools">${ico("plus")}</button>
           <button class="mode-chip" id="mode-chip" data-act="mode-menu"></button>
+          <button class="mode-chip" id="type-chip" data-act="type-menu" aria-haspopup="menu" style="display:none"></button>
           <button class="mode-chip" id="rz-chip" data-act="reasoning" aria-haspopup="dialog"></button>
           <button class="mode-chip hide-sm" id="web-chip" data-act="toggle-web" title="Use the provider's built-in web search (may incur provider cost)">${ico("globe", "sm")}Search</button>
           <span class="grow"></span>
@@ -97,10 +98,12 @@ const UI = {
   bindComposer() {
     const ta = $("prompt"), v = $("view");
     const grow = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 220) + "px"; };
-    ta.addEventListener("input", () => { grow(); App.drafts[App.chatId] = ta.value; });
+    ta.addEventListener("input", () => { grow(); App.drafts[App.chatId] = ta.value; this.checkLength(); });
     ta.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing && (Store.settings.enterToSend || e.metaKey || e.ctrlKey) && !this.mobile()) { e.preventDefault(); ACTS.send(); }
-      else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); ACTS.send(); }
+      // Enter never stops a running reply (only the Stop button or Esc does) and never sends an empty message.
+      const go = () => { if (!isBusy()) ACTS.send(); };
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing && (Store.settings.enterToSend || e.metaKey || e.ctrlKey) && !this.mobile()) { e.preventDefault(); go(); }
+      else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); go(); }
     });
     ta.addEventListener("keydown", (e) => { if (e.key === "ArrowUp" && !ta.value && !e.shiftKey && !isBusy()) { const u = this.visibleNodes(curChat()).filter((n) => n.role === "user").pop(); if (u) { e.preventDefault(); ACTS["edit-msg"]({ dataset: { id: u.id } }); } } });
     ta.addEventListener("paste", (e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); this.addFiles(fs); } });
@@ -112,15 +115,24 @@ const UI = {
     $("thread").addEventListener("scroll", () => { this.stick = this.nearBottom(); this.updateScrollBtn(); }, { passive: true });
   },
   stick: true,
+  // Warns while typing when a message cannot fit the device's per-request limit (room is kept for the system prompt and history).
+  checkLength() {
+    const note = $("note"), ta = $("prompt"); if (!note || !ta) return;
+    const room = Dev.limits.bodyBytes - 1800, bytes = new Blob([ta.value]).size, over = bytes > room;
+    if (over) { note.classList.add("warn"); note.textContent = `This message is ${fmtBytes(bytes)} but this device takes about ${fmtBytes(room)} per request. Shorten it, or attach a file instead.`; }
+    else if (note.classList.contains("warn")) { note.classList.remove("warn"); this.syncComposer(); }
+  },
   nearBottom() { const t = $("thread"); return !t || t.scrollHeight - t.scrollTop - t.clientHeight < 160; },
   scrollBottom(force) { const t = $("thread"); if (t && (force || this.stick)) t.scrollTop = t.scrollHeight; },
   syncComposer() {
     const chat = curChat(); if (!chat) return;
     const ta = $("prompt"), busy = isBusy(), mode = MODES[chat.mode] || MODES.chat;
     if (document.activeElement !== ta || ta.dataset.chat !== chat.id) { if (ta.dataset.chat !== chat.id) { ta.value = App.drafts[chat.id] || ""; ta.dataset.chat = chat.id; } }
-    ta.placeholder = chat.mode === "chat" ? "Message ChatESP" : mode.hint + "…";
+    const dt = designType(chat.designType || "auto");
+    ta.placeholder = chat.mode === "chat" ? "Message ChatESP" : chat.mode === "design" ? (chat.designType && chat.designType !== "auto" ? `Describe the ${dt.label.toLowerCase()} you want, or ask for a change…` : "Describe what to design, or ask for a change…") : mode.hint + "…";
+    const tc = $("type-chip"); tc.style.display = chat.mode === "design" ? "" : "none"; tc.className = "mode-chip " + (chat.designType && chat.designType !== "auto" ? "on" : ""); tc.innerHTML = ico(dt.icon, "sm") + `<span>${esc(dt.label)}</span>` + ico("chevd", "sm"); tc.title = "Design type";
     $("mode-chip").className = "mode-chip " + (chat.mode !== "chat" ? "on" : ""); $("mode-chip").innerHTML = ico(mode.icon, "sm") + esc(mode.label) + ico("chevd", "sm");
-    const rz = reasoningFor(chat.provider, chat.model, chat.effort, chat.think), rzc = $("rz-chip");
+    const rz = reasoningFor(chat.provider, chat.model, effortFor(chat), chat.think), rzc = $("rz-chip");
     rzc.style.display = rz ? "" : "none";
     if (rz) { rzc.className = "mode-chip " + (rz.on ? "on" : ""); rzc.innerHTML = ico("brain", "sm") + `<span class="hide-sm">Reasoning</span><b>${rz.on ? (rz.level ? esc(rz.level[0].toUpperCase() + rz.level.slice(1)) : "On") : "Off"}</b>`; rzc.title = "Reasoning effort"; }
     $("web-chip").className = "mode-chip hide-sm " + (chat.webSearch ? "on" : ""); $("web-chip").style.display = Store.settings.nativeSearch ? "" : "none";
@@ -129,7 +141,7 @@ const UI = {
     $("tray").innerHTML = App.atts.map((a, i) => `<span class="attach">${a.kind === "image" ? `<img alt="" src="${a.data}">` : ico("file")}<span class="truncate">${esc(a.name)}</span><button class="tool-btn" data-act="rm-att" data-i="${i}" aria-label="Remove">${ico("x", "sm")}</button></span>`).join("");
     $("tray").style.display = App.atts.length ? "" : "none";
     const lim = Dev.limits.bodyBytes;
-    $("note").textContent = chat.temp ? "Temporary chat: nothing is saved in this browser." : `Keys stay on the ${Dev.health?.chip || "ESP"}. Chats stay in this browser.${lim < 12000 ? " This device has a small request limit; long chats are trimmed." : ""}`;
+    $("note").textContent = chat.temp ? "Temporary chat: nothing is saved in this browser." : `Keys stay on the ${Dev.health?.chip || "ESP"}. Chats stay in this browser.${lim < 12000 ? " This device has a small request limit; long chats are compacted automatically." : ""}`;
     const g = $("prompt"); g.style.height = "auto"; g.style.height = Math.min(g.scrollHeight, 220) + "px";
   },
   async addFiles(files) {
@@ -201,10 +213,11 @@ const UI = {
       chat: [["sparkle", "Explain something", "Break down a tricky idea step by step.", "Explain how a transformer neural network works, step by step, for a curious beginner."], ["code", "Write code", "Draft, review or debug a snippet.", "Write a small Python script that renames files by date taken and explain how it works."], ["list", "Plan something", "Turn a rough goal into a plan.", "Help me plan a three-day trip to Kyoto on a modest budget."], ["edit", "Improve my writing", "Rewrite for clarity and tone.", "Rewrite this to be clearer and friendlier: "]],
       agent: [["file", "Make a document", "Research-free reports, briefs, memos.", "Create a one-page project brief for a home energy monitor built on an ESP32 and save it as a Word document."], ["grid", "Build a spreadsheet", "Budgets, trackers, comparisons.", "Create a monthly budget spreadsheet with income, fixed costs, variable costs and a savings goal."], ["deck", "Make a deck", "A full PPTX from a brief.", "Make a 6-slide presentation introducing the ESP32 to hobbyists."], ["globe", "Look it up and summarise", "Search, read, then answer.", "Find the current stable version of PlatformIO and summarise what changed recently."]],
       research: [["flask", "Deep dive", "Cited report from multiple sources.", "Research the current state of small on-device language models and write a cited report."], ["globe", "Compare options", "Pros, cons and sources.", "Compare MQTT, CoAP and HTTP for low-power IoT sensors, with sources."], ["info", "Fact-check a claim", "Check it against sources.", "Is it true that Wi-Fi 6E uses the 6 GHz band? Check against sources."], ["list", "Learn a topic", "A structured primer with links.", "Give me a researched primer on how LoRaWAN works."]],
-      deck: [["deck", "Pitch deck", "Problem, solution, traction, ask.", "A 10-slide pitch deck for a pocket-sized AI gateway called ChatESP."], ["list", "Lesson slides", "Teach a topic in 8 slides.", "An 8-slide lesson on how the internet routes a web request."], ["grid", "Quarterly update", "Numbers with charts.", "A 7-slide quarterly business update with a revenue bar chart and a growth line chart."], ["sparkle", "Story talk", "A short narrative talk.", "A 6-slide lightning talk about why I built an AI chatbot on a microcontroller."]],
+      design: [["globe", "Portfolio website", "A distinctive personal site.", "A portfolio website for an industrial designer who makes ESP32 gadgets, with a projects grid, about section and contact form."], ["panel", "App prototype", "Clickable screens.", "A clickable prototype of a habit-tracking mobile app with onboarding, a daily check-in screen, streaks and settings."], ["cpu", "Analytics dashboard", "KPIs, charts and tables.", "An analytics dashboard for a small online shop with revenue, orders, conversion and a sortable product table."], ["deck", "Research deck", "Slides with cited sources.", "An 8-slide comparison of Apple Silicon and x86 laptops. Do research and back it up with benchmarks."]],
     }[chat.mode] || [];
     const need = !providerReady(chat);
     return `<div class="hero"><div class="orb">${ico("sparkle", "lg")}</div><h1>${hello}${name}.<br>What shall we work on?</h1><p>${esc((MODES[chat.mode] || MODES.chat).hint)}. Your keys stay on the device; your chats stay in this browser.</p>
+      ${chat.mode === "design" ? `<div class="design-types" role="group" aria-label="Design types">${DESIGN_TYPES.filter((t) => t.id !== "auto").map((t) => `<button class="dtile ${chat.designType === t.id ? "on" : ""}" data-act="pick-design-type" data-id="${t.id}"><span class="ic">${ico(t.icon, "sm")}</span><b>${esc(t.label)}</b><span>${esc(t.hint)}</span></button>`).join("")}</div>` : ""}
       ${need ? `<div class="callout" style="width:100%;text-align:left">${ico("key")}<span class="grow">${Dev.configured(chat.provider) ? "Choose a model to start chatting." : "Add a provider key to start chatting."}</span><button class="btn primary sm" data-act="${Dev.configured(chat.provider) ? "pick-model" : "go-settings"}">${Dev.configured(chat.provider) ? "Choose model" : "Add key"}</button></div>` : ""}
       <div class="starters">${S.map((x) => `<button class="starter" data-starter="${esc(x[3])}"><span class="ic">${ico(x[0], "sm")}</span><b>${esc(x[1])}</b><span>${esc(x[2])}</span></button>`).join("")}</div></div>`;
   },
@@ -220,7 +233,7 @@ const UI = {
     let steps = "";
     if ((n.steps || []).length) {
       const running = n.steps.some((s) => s.state === "run"), live = n.pending || running;
-      steps = `<details class="steps" data-kind="steps" data-id="${n.id}" ${live ? (n.stepsClosed ? "" : "open") : n.stepsOpen ? "open" : ""}><summary>${n.pending ? ico("loader", "sm") : ico("check", "sm")}<span class="grow">${n.pending ? "Working…" : `${n.steps.length} steps`}</span>${ico("chevd", "sm")}</summary>${n.steps.map((s) => `<div class="step ${s.state}"><span class="si">${ico(s.state === "err" ? "x" : s.state === "run" ? "loader" : "check", "sm")}</span><div class="grow"><div>${esc(s.label)}</div>${s.detail ? `<div class="sd">${esc(s.detail)}</div>` : ""}</div></div>`).join("")}</details>`;
+      steps = `<details class="steps" data-kind="steps" data-id="${n.id}" ${live ? (n.stepsClosed ? "" : "open") : n.stepsOpen ? "open" : ""}><summary>${n.pending ? ico("loader", "sm") : n.steps.some((x) => x.state === "err") ? ico("warn", "sm") : ico("check", "sm")}<span class="grow">${n.pending ? "Working…" : `${n.steps.length} step${n.steps.length === 1 ? "" : "s"}${n.steps.some((x) => x.state === "err") ? ` · ${n.steps.filter((x) => x.state === "err").length} failed` : ""}`}</span>${ico("chevd", "sm")}</summary>${n.steps.map((s) => `<div class="step ${s.state}"><span class="si">${ico(s.state === "err" ? "x" : s.state === "run" ? "loader" : "check", "sm")}</span><div class="grow"><div>${esc(s.label)}</div>${s.detail ? `<div class="sd">${esc(s.detail)}</div>` : ""}</div></div>`).join("")}</details>`;
     }
     let think = "";
     if (n.think) {
@@ -232,14 +245,15 @@ const UI = {
     else if (waiting && !(n.steps || []).length && !n.think && !n.genPending) body = n.rz && n.rz !== "off" ? `<div class="thinking-line" role="status"><span class="shimmer">Thinking</span> <span class="think-timer" data-since="${n.ts}"></span></div>` : `<div class="thinking" role="status" aria-label="Thinking"><i></i><i></i><i></i></div>`;
     const err = n.error ? `<div class="err-card" role="alert"><b>${esc(n.error.message)}</b><span>${esc(n.error.hint)}</span><div style="margin-top:8px"><button class="btn sm" data-act="regen" data-id="${n.id}">${ico("refresh", "sm")}Retry</button></div></div>` : "";
     const gen = n.genPending ? `<div class="gen-skel" role="status"><div class="shimmer-box"></div><span>Creating image…</span></div>` : (n.gen || []).map((src, i) => `<figure class="gen"><img src="${src}" alt="Generated image" loading="lazy" data-act="open-image" data-id="${n.id}" data-i="${i}"><figcaption><button class="tool-btn" data-act="open-image" data-id="${n.id}" data-i="${i}" aria-label="Open image">${ico("eye", "sm")}</button><button class="tool-btn" data-act="dl-image" data-id="${n.id}" data-i="${i}" aria-label="Download image">${ico("download", "sm")}</button></figcaption></figure>`).join("");
-    const arts = (n.artifacts || []).map((a, i) => `<button class="artifact-card" data-act="open-artifact" data-id="${n.id}" data-i="${i}">${fileIcon(a.name)}<div class="grow"><div class="truncate" style="font-weight:600">${esc(a.name)}</div><div class="muted" style="font-size:12.5px">${fmtBytes(a.size)} · ${a.stored ? "Stored on device" : "Downloaded only"}</div></div>${ico("arrowr", "sm")}</button>`).join("");
+    const designCard = n.design && n.design.code ? `<button class="artifact-card" data-act="open-design" data-id="${n.id}"><span class="file-ico ${n.design.kind === "svg" ? "" : "pptx"}">${n.design.kind === "svg" ? "SVG" : "WEB"}</span><div class="grow"><div class="truncate" style="font-weight:600">${esc(n.design.title)}${n.design.live ? ' <span class="chip">building…</span>' : ""}</div><div class="muted" style="font-size:12.5px">${esc(n.design.label)} · v${n.design.v} · ${fmtBytes(n.design.code.length)} · open to preview and export</div></div>${ico("arrowr", "sm")}</button>` : "";
+    const arts = (n.artifacts || []).filter((a) => !(n.design && a.name === n.design.file)).map((a, i) => `<button class="artifact-card" data-act="open-artifact" data-id="${n.id}" data-i="${i}">${fileIcon(a.name)}<div class="grow"><div class="truncate" style="font-weight:600">${esc(a.name)}</div><div class="muted" style="font-size:12.5px">${fmtBytes(a.size)} · ${a.stored ? "Stored on device" : "Downloaded only"}</div></div>${ico("arrowr", "sm")}</button>`).join("");
     const deck = n.deck ? `<button class="artifact-card" data-act="open-deck" data-id="${n.id}"><span class="file-ico pptx">DECK</span><div class="grow"><div class="truncate" style="font-weight:600">${esc(n.deck.title)}</div><div class="muted" style="font-size:12.5px">${n.deck.slides.length} slides · open to edit and export</div></div>${ico("arrowr", "sm")}</button>` : "";
     const report = n.report ? `<button class="artifact-card" data-act="open-report" data-id="${n.id}"><span class="file-ico">RPT</span><div class="grow"><div class="truncate" style="font-weight:600">${esc(n.report.title)}</div><div class="muted" style="font-size:12.5px">${sources.length} sources · open to export</div></div>${ico("arrowr", "sm")}</button>` : "";
     const chips = sources.length && mode !== "research" ? `<div class="cites">${sources.slice(0, 8).map((s, i) => `<a class="cite-chip" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer"><b>${i + 1}</b><span class="truncate">${esc(safe(() => new URL(s.url).hostname.replace(/^www\./, ""), s.title))}</span></a>`).join("")}</div>` : "";
     const sug = isLast && !n.pending && (n.suggest || []).length ? `<div class="suggest">${n.suggest.map((q) => `<button data-suggest="${esc(q)}">${esc(q)}</button>`).join("")}</div>` : "";
     const meta = !n.pending && n.model ? `<span class="meta" title="${esc(fmtDate(n.ts))}">${esc(n.model)}${n.rz ? " · " + (n.rz === "off" ? "no reasoning" : n.rz + " effort") : ""}${n.usage ? ` · ${n.usage.est ? "~" : ""}${(n.usage.input || 0) + (n.usage.output || 0)} tokens` : ""}</span>` : "";
-    const tools = n.pending ? "" : `<div class="tools">${pager}<button class="tool-btn" data-act="copy-msg" data-id="${n.id}" aria-label="Copy" title="Copy">${ico("copy", "sm")}</button><button class="tool-btn" data-act="regen" data-id="${n.id}" aria-label="Regenerate" title="Regenerate">${ico("refresh", "sm")}</button><button class="tool-btn" data-act="speak" data-id="${n.id}" aria-label="Read aloud" title="Read aloud">${ico("speaker", "sm")}</button><button class="tool-btn ${n.fb === "up" ? "on" : ""}" data-act="fb" data-id="${n.id}" data-v="up" aria-label="Good response" aria-pressed="${n.fb === "up"}" title="Good response">${ico("thumbup", "sm")}</button><button class="tool-btn ${n.fb === "down" ? "on" : ""}" data-act="fb" data-id="${n.id}" data-v="down" aria-label="Bad response" aria-pressed="${n.fb === "down"}" title="Bad response">${ico("thumbdown", "sm")}</button><button class="tool-btn" data-act="msg-more" data-id="${n.id}" aria-label="More actions" aria-haspopup="menu" title="More">${ico("more", "sm")}</button>${n.stopped ? `<button class="btn sm ghost" data-act="cont" data-id="${n.id}">Continue</button>` : ""}${meta}</div>`;
-    return `<div class="msg assistant ${isLast ? "last" : ""}${anim}" data-node="${n.id}" aria-busy="${!!n.pending}"><div data-part="steps">${steps}</div><div data-part="think">${think}</div><div class="body" data-part="body">${body}${gen}${err}${n.stopped && !n.text && !gen ? `<span class="muted">Stopped.</span>` : ""}${arts}${deck}${report}${chips}${sug}</div><div data-part="tools">${tools}</div></div>`;
+    const tools = n.pending ? "" : `<div class="tools">${pager}<button class="tool-btn" data-act="copy-msg" data-id="${n.id}" aria-label="Copy" title="Copy">${ico("copy", "sm")}</button><button class="tool-btn" data-act="regen" data-id="${n.id}" aria-label="Regenerate" title="Regenerate">${ico("refresh", "sm")}</button><button class="tool-btn" data-act="speak" data-id="${n.id}" aria-label="Read aloud" title="Read aloud">${ico("speaker", "sm")}</button><button class="tool-btn ${n.fb === "up" ? "on" : ""}" data-act="fb" data-id="${n.id}" data-v="up" aria-label="Good response" aria-pressed="${n.fb === "up"}" title="Good response">${ico("thumbup", "sm")}</button><button class="tool-btn ${n.fb === "down" ? "on" : ""}" data-act="fb" data-id="${n.id}" data-v="down" aria-label="Bad response" aria-pressed="${n.fb === "down"}" title="Bad response">${ico("thumbdown", "sm")}</button><button class="tool-btn" data-act="msg-more" data-id="${n.id}" aria-label="More actions" aria-haspopup="menu" title="More">${ico("more", "sm")}</button>${n.stopped || (n.error && n.text) ? `<button class="btn sm ghost" data-act="cont" data-id="${n.id}">Continue</button>` : ""}${meta}</div>`;
+    return `<div class="msg assistant ${isLast ? "last" : ""}${anim}" data-node="${n.id}" aria-busy="${!!n.pending}"><div data-part="steps">${steps}</div><div data-part="think">${think}</div><div class="body" data-part="body">${body}${gen}${err}${n.stopped && !n.text && !gen ? `<span class="muted">Stopped.</span>` : ""}${designCard}${arts}${deck}${report}${chips}${sug}</div><div data-part="tools">${tools}</div></div>`;
   },
 };
 const isMac = () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -278,11 +292,11 @@ ACTS["rm-att"] = (el) => { App.atts.splice(+el.dataset.i, 1); UI.syncComposer();
 ACTS["attach-menu"] = (el) => openMenu(el, [{ label: "Upload files or images", icon: "paperclip", fn: () => $("file-in").click() }, { label: "Generate an image", icon: "image", fn: imageDialog }, { sep: 1 }, { label: "Saved prompts & personas", icon: "user", fn: personaMenu }], { up: true });
 ACTS["mode-menu"] = (el) => { const c = curChat(); openMenu(el, Object.entries(MODES).map(([k, m]) => ({ label: m.label, icon: m.icon, sub: m.hint.split(" ").slice(0, 3).join(" "), sel: c.mode === k, fn: () => { c.mode = k; Store.saveChat(c); UI.render(); } })), { up: true }); };
 ACTS.reasoning = (el) => {
-  const chat = curChat(), rz = reasoningFor(chat.provider, chat.model, chat.effort, chat.think); if (!rz) return;
+  const chat = curChat(), rz = reasoningFor(chat.provider, chat.model, effortFor(chat), chat.think); if (!rz) return;
   const { spec } = rz, cap = (t) => t[0].toUpperCase() + t.slice(1);
   const how = { effort: "Controls how much the model thinks before answering.", budget: "Sets how many tokens the model may spend thinking.", glevel: "Sets how deeply the model thinks.", olevel: "Sets how deeply the model thinks.", think: "Lets the model think step by step before answering." }[spec.kind];
   const draw = (m) => {
-    const cur = reasoningFor(chat.provider, chat.model, chat.effort, chat.think), n = spec.levels.length, idx = Math.max(0, spec.levels.indexOf(cur.level));
+    const cur = reasoningFor(chat.provider, chat.model, effortFor(chat), chat.think), n = spec.levels.length, idx = Math.max(0, spec.levels.indexOf(cur.level));
     m.innerHTML = `<div class="rz"><div class="row"><b>Reasoning</b><span class="grow"></span>${spec.canDisable ? `<input type="checkbox" class="switch" id="rz-on" ${cur.on ? "checked" : ""} aria-label="Reasoning on or off">` : `<span class="chip neutral">always on</span>`}</div>
       <p class="muted" style="margin:4px 0 0;font-size:13px">${esc(how)}</p>
       ${n > 1 ? `<div class="rz-slider ${cur.on ? "" : "off"}"><input type="range" id="rz-range" min="0" max="${n - 1}" step="1" value="${idx}" ${cur.on ? "" : "disabled"} aria-label="Effort level" aria-valuetext="${esc(cap(cur.level))}"><div class="rz-ticks" style="--n:${n}">${spec.levels.map((l, i) => `<button data-i="${i}" class="${i === idx ? "on" : ""}" ${cur.on ? "" : "disabled"}>${esc(cap(l))}</button>`).join("")}</div></div>
@@ -290,8 +304,8 @@ ACTS.reasoning = (el) => {
       ${spec.note ? `<div class="muted" style="font-size:12.5px">${esc(spec.note)}</div>` : ""}</div>`;
     const set = (patch) => { Object.assign(chat, patch); Store.saveChat(chat); UI.syncComposer(); draw(m); };
     m.querySelector("#rz-on")?.addEventListener("change", (e) => set({ think: e.target.checked }));
-    m.querySelector("#rz-range")?.addEventListener("input", (e) => set({ effort: spec.levels[+e.target.value] }));
-    m.querySelectorAll(".rz-ticks button").forEach((b) => b.addEventListener("click", () => set({ effort: spec.levels[+b.dataset.i] })));
+    m.querySelector("#rz-range")?.addEventListener("input", (e) => set({ effort: spec.levels[+e.target.value], effortTouched: true }));
+    m.querySelectorAll(".rz-ticks button").forEach((b) => b.addEventListener("click", () => set({ effort: spec.levels[+b.dataset.i], effortTouched: true })));
   };
   openPanel(el, "", { up: true, width: 320, onMount: draw });
 };
@@ -342,6 +356,9 @@ ACTS.mic = (el) => {
   ACTS.mic.rec = rec; $("mic").classList.add("on"); rec.start();
 };
 ACTS["open-artifact"] = (el) => { const n = curChat().nodes[el.dataset.id]; Canvas.show({ type: "artifact", chatId: App.chatId, nodeId: n.id, index: +el.dataset.i }); };
+ACTS["open-design"] = (el) => Canvas.show({ type: "design", chatId: App.chatId, nodeId: el.dataset.id });
+ACTS["type-menu"] = (el) => { const c = curChat(); openMenu(el, DESIGN_TYPES.map((t) => ({ label: t.label, icon: t.icon, sub: t.id === "auto" ? "" : t.kind === "deck" ? "slides" : t.kind === "svg" ? "graphic" : "web", sel: (c.designType || "auto") === t.id, fn: () => { c.designType = t.id; Store.saveChat(c); UI.render(); } })), { up: true }); };
+ACTS["pick-design-type"] = (el) => { const c = curChat(); c.designType = el.dataset.id; Store.saveChat(c); UI.render(); setTimeout(() => $("prompt") && $("prompt").focus(), 40); };
 ACTS["open-deck"] = (el) => Canvas.show({ type: "deck", chatId: App.chatId, nodeId: el.dataset.id });
 ACTS["open-report"] = (el) => Canvas.show({ type: "report", chatId: App.chatId, nodeId: el.dataset.id });
 ACTS["toggle-canvas"] = () => (Canvas.isOpen() ? Canvas.close() : Canvas.reopen());
@@ -363,7 +380,7 @@ ACTS["chat-menu"] = (el, e) => {
     { label: "Rename", icon: "edit", fn: async () => { const t = await promptDialog("Rename chat", c.title, "Title"); if (t) { c.title = t.slice(0, 72); Store.saveChat(c); UI.render(); } } },
     { label: "Move to project", icon: "folder", fn: () => moveToProject(c) },
     { label: "Archive", icon: "archive", fn: () => { c.archived = true; Store.saveChat(c); if (App.chatId === c.id) newChatAction(); else UI.renderRail(); } },
-    { sep: 1 }, { label: "Delete", icon: "trash", danger: true, fn: async () => { if (await confirmDialog("Delete chat?", "This removes it from this browser.", "Delete", true)) { Store.deleteChat(c.id); if (App.chatId === c.id) newChatAction(); else UI.renderRail(); } } },
+    { sep: 1 }, { label: "Delete", icon: "trash", danger: true, fn: async () => { if (await confirmDialog("Delete chat?", "This removes it from this browser.", "Delete", true)) { stopChat(c.id); Store.deleteChat(c.id); if (App.chatId === c.id) newChatAction(); else UI.renderRail(); } } },
   ]);
 };
 ACTS["open-chat"] = (el, e) => { if (e.target.closest("[data-act=chat-menu]")) return; openChat(el.dataset.id); };

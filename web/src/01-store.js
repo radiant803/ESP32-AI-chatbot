@@ -3,7 +3,7 @@ const DB_NAME = "chatesp2", KV = "kv";
 const DEFAULT_SETTINGS = {
   theme: "auto", accent: "indigo", name: "", instructions: "", tone: "balanced", memoryOn: true,
   searchProvider: "duckduckgo", suggestions: true, agentApprove: false, nativeSearch: false, enterToSend: true, pinHash: "",
-  provider: "", model: "", temperature: 0.7, effort: "medium", think: true, maxTokens: 4096, onboarded: false, ttsVoice: "", favModels: [], recentModels: [], modelCache: {}, modelCacheTs: {}, dailyBudget: 0,
+  provider: "", model: "", temperature: 0.7, effort: "medium", think: true, maxTokens: 4096, deepTokens: 16000, deepMinutes: 15, deepEffort: "high", onboarded: false, ttsVoice: "", favModels: [], recentModels: [], modelCache: {}, modelCacheTs: {}, dailyBudget: 0,
 };
 const Store = {
   settings: { ...DEFAULT_SETTINGS }, chats: {}, projects: {}, memory: [], personas: [], usage: {}, ready: false, mode: "idb",
@@ -23,7 +23,7 @@ const Store = {
       else if (k === "memory") this.memory = v || [];
       else if (k === "personas") this.personas = v || [];
       else if (k === "usage") this.usage = v || {};
-      else if (k.startsWith("chat:")) this.chats[v.id] = v;
+      else if (k.startsWith("chat:")) { if (v.mode === "deck") v.mode = "design"; this.chats[v.id] = v; }
       else if (k.startsWith("project:")) this.projects[v.id] = v;
     }
     await this.migrateV1();
@@ -51,8 +51,9 @@ const Store = {
     this._timers[key] = setTimeout(() => this._put(key, value), delay);
   },
   saveSettings() { this.save("settings", this.settings, 50); },
-  saveChat(chat) { if (chat.temp) return; chat.updatedAt = Date.now(); this.save("chat:" + chat.id, chat); },
-  deleteChat(id) { delete this.chats[id]; clearTimeout(this._timers["chat:" + id]); this._del("chat:" + id); },
+  saveChat(chat) { if (chat.temp || this.deleted.has(chat.id)) return; chat.updatedAt = Date.now(); this.save("chat:" + chat.id, chat); },
+  deleted: new Set(),  // ids deleted this session: a reply still arriving must not re-save them
+  deleteChat(id) { this.deleted.add(id); delete this.chats[id]; clearTimeout(this._timers["chat:" + id]); this._del("chat:" + id); },
   saveProject(p) { this.save("project:" + p.id, p); },
   deleteProject(id) { delete this.projects[id]; this._del("project:" + id); },
   saveMemory() { this.save("memory", this.memory, 100); },

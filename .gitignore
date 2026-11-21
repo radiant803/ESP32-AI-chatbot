@@ -4,3 +4,4 @@
 src/secrets.h
 data/
 web/dist/
+.claude/

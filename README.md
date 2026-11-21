@@ -1,8 +1,10 @@
 # ChatESP v2
 
 A private AI workspace served by a microcontroller. The ESP holds your provider keys and streams requests to
-**OpenAI, Anthropic, Google Gemini or a LAN Ollama server**; everything else (chats, agents, research,
+**OpenAI (recommended), Anthropic or Google Gemini (beta)**; everything else (chats, agents, research,
 presentations, files) runs in the browser you open it from. Runs on **ESP32** and **ESP8266 (NodeMCU)**.
+
+> **Status: OpenAI works best.** Agent mode and the Anthropic and Google Gemini providers are **beta**: they work but can be slow or unreliable, especially on the ESP8266. Ollama support is disabled for now.
 
 ## What's new in v2
 
@@ -10,11 +12,15 @@ presentations, files) runs in the browser you open it from. Runs on **ESP32** an
 - ChatGPT-class chat: streaming with Stop, regenerate, edit-and-resend with version pager, copy, read aloud, thumbs, dictation,
   image and file attachments (images, text, code, PDF), image generation, search, pin/archive/rename, **Projects**,
   custom instructions, memory, personas, temporary chats, model compare, export, optional PIN screen lock.
-- **Agent mode:** plan, search, read pages, calculate, and create DOCX/XLSX/PPTX/HTML/text/code files, with hard step and time caps.
-- **Presentations:** prompt to outline to an editable deck (8 layouts, 6 themes, charts, images, speaker notes); export PPTX, HTML, PDF.
+- **Agent mode (beta):** plan, search, read pages, calculate, and create DOCX/XLSX/PPTX/HTML/SVG/text/code files. Agent and Design get deep reasoning, a large output budget and a long time limit
+  (Settings -> Models: reasoning level, max output tokens, minutes); Chat stays quick and capped.
+- **Design mode** (formerly Presentation): slide decks, websites, landing pages, app prototypes, dashboards, UI modules (pricing, forms, navigation, cards), email, posters and SVG graphics.
+  It writes a concept brief first, then builds the file with a live preview (phone / tablet / desktop), checks it, lets you refine it in plain language (each change is a version) and exports HTML, SVG, PDF or PPTX.
+  Decks keep the editable studio: 8 layouts, 6 themes, charts, images, speaker notes; export PPTX, HTML, PDF.
+- **Automatic compaction:** when a chat outgrows the device's request limit, the oldest turns are folded into a rolling summary instead of being dropped.
 - **Research mode:** plans queries, searches, reads sources, writes a cited report; export Markdown/DOCX/PDF; "Go deeper".
 - Device tooling: Wi-Fi provisioning from the browser, OTA firmware upload, mDNS (`chatesp.local`), storage manager.
-- All v1 features kept: four providers, live model discovery only, transactional Test & Save, distinct error classes,
+- All v1 features kept: three providers (Ollama disabled), live model discovery only, transactional Test & Save, distinct error classes,
   keys never returned to the browser, recovery AP, artifact storage, 320 px layout.
 
 ## Output quality
@@ -25,7 +31,16 @@ syntax-highlighted code with copy / wrap / download / collapse, a live "Thinking
 and files that look finished: Word documents with real styles, tables, lists and page numbers, and Excel workbooks with a styled frozen header, filters, number/percent/date types and formulas.
 Math and Office export load their libraries from a CDN the first time they are needed.
 
-Run the checks with `node web/test/markdown.test.cjs` and `node web/test/reasoning.test.cjs`.
+Resilience: if a model rejects a parameter (for example `temperature` on reasoning models) the app reads the provider's message, retries without it and remembers
+the choice; truncated or fenced JSON from a model is repaired; step lists never keep spinning after a failure; deleting a chat mid-reply cannot bring it back;
+tabs running an old build are told to reload. Research-backed presentations search for benchmark pages, digest each page, cite sources on a Sources slide, and say
+plainly when a number could not be verified.
+
+ESP8266 notes: a TLS session needs about 17 KB of contiguous heap, so the firmware parks large request bodies in flash before connecting, pauses mDNS
+(`chatesp.local` returns when the board is idle) and refuses a call when memory is short (the app retries). Because per-token streaming events cost several
+megabytes and leave only a few KB of heap, Agent and Design on this chip fetch long replies in one piece, so the live code preview shows when the reply lands.
+
+Run the checks with `node web/test/markdown.test.cjs`, `node web/test/reasoning.test.cjs`, `node web/test/json.test.cjs` and `node web/test/design.test.cjs`.
 
 ## How it works
 
@@ -40,7 +55,7 @@ streaming, vision, web search and larger outputs now work within a few KB of RAM
 | Chip | Request limit | Notes |
 | --- | --- | --- |
 | ESP32 | 40 KB per request | Full feature set |
-| ESP8266 | 6 KB per request | Long chats are trimmed; images disabled; HTTPS to cloud providers depends on TLS memory (see below) |
+| ESP8266 | 6 KB per request | Long chats are compacted automatically; images disabled; HTTPS to cloud providers depends on TLS memory (see below) |
 
 ## Build and flash
 
@@ -78,7 +93,7 @@ search (OpenAI/Anthropic/Gemini) is off by default because it can add charges to
 
 The NodeMCU build works, but HTTPS to cloud providers needs about 20-30 KB of free heap for TLS and many servers send 16 KB
 records. The firmware probes for a smaller TLS fragment size and falls back to larger buffers; if a provider fails with `low_memory`
-or `network_unreachable`, use Ollama over plain HTTP on your LAN or an ESP32. On a NodeMCU, TLS to OpenAI, Anthropic and Gemini connected (about 32 KB free heap during the handshake); see `docs/superpowers/specs/2026-10-26-chatesp-v2-design.md` for hardware findings. Use a good USB power source and a decent signal: the ESP8266 radio is easily starved.
+or `network_unreachable`, use an ESP32 (the ESP8266 has very little spare memory for TLS). On a NodeMCU, TLS to OpenAI, Anthropic and Gemini connected (about 32 KB free heap during the handshake); see `docs/superpowers/specs/2026-10-26-chatesp-v2-design.md` for hardware findings. Use a good USB power source and a decent signal: the ESP8266 radio is easily starved.
 
 ## Security notes
 
@@ -92,4 +107,3 @@ HTML previews are sandboxed. `/api/fetch` refuses private and loopback addresses
 - **`network_unreachable`**: DNS/TLS/Wi-Fi failure; not a bad key.
 - **`low_memory`**: the ESP is busy; retry or shorten the request.
 - **`request_too_large`**: shorten the chat or attach smaller files (limit shown in Settings -> Device).
-- **Ollama can't connect**: use the host's LAN IP and port, not `localhost`.
