@@ -342,9 +342,11 @@ async function streamChat(provider, req, cb = {}, signal) {
     throw e;
   }
 }
+const jsonBodyBytes = (body) => new TextEncoder().encode(JSON.stringify(body)).length;
+
 async function streamChatNow(provider, req, cb = {}, signal) {
   const { path, body, buffered } = buildRequest(provider, req);
-  const bytes = JSON.stringify(body).length;
+  const bytes = jsonBodyBytes(body);
   if (bytes > Dev.limits.bodyBytes) throw new ApiError("request_too_large", `This request is ${fmtBytes(bytes)}; this device accepts up to ${fmtBytes(Dev.limits.bodyBytes)}.`, "Shorten the conversation, start a new chat, or attach smaller files.", 413);
   applyQuirks(provider, req.model, body);
   let res;

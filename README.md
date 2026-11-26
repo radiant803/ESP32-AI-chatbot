@@ -17,7 +17,7 @@ presentations, files) runs in the browser you open it from. Runs on **ESP32** an
 - **Design mode** (formerly Presentation): slide decks, websites, landing pages, app prototypes, dashboards, UI modules (pricing, forms, navigation, cards), email, posters and SVG graphics.
   It writes a concept brief first, then builds the file with a live preview (phone / tablet / desktop), checks it, lets you refine it in plain language (each change is a version) and exports HTML, SVG, PDF or PPTX.
   Decks keep the editable studio: 8 layouts, 6 themes, charts, images, speaker notes; export PPTX, HTML, PDF.
-- **Automatic compaction:** when a chat outgrows the device's request limit, the oldest turns are folded into a rolling summary instead of being dropped.
+- **Automatic compaction:** when a request exceeds the board’s byte limit, ChatESP summarizes earlier turns and fits the summary around the latest user message. The latest message is sent verbatim, and recent exchanges are kept when they fit.
 - **Research mode:** plans queries, searches, reads sources, writes a cited report; export Markdown/DOCX/PDF; "Go deeper".
 - Device tooling: Wi-Fi provisioning from the browser, OTA firmware upload, mDNS (`chatesp.local`), storage manager.
 - All v1 features kept: three providers (Ollama disabled), live model discovery only, transactional Test & Save, distinct error classes,
@@ -40,7 +40,7 @@ ESP8266 notes: a TLS session needs about 17 KB of contiguous heap, so the firmwa
 (`chatesp.local` returns when the board is idle) and refuses a call when memory is short (the app retries). Agent steps also ask for a smaller TLS receive buffer (about 8 KB freed; it falls back to full size if a reply does not arrive intact), the proxy waits a few seconds for a 23 KB free block before opening a connection, and the board abandons a wait when you press Stop. Because per-token streaming events cost several
 megabytes and leave only a few KB of heap, Agent and Design on this chip fetch long replies in one piece, so the live code preview shows when the reply lands.
 
-Run the checks with `node web/test/markdown.test.cjs`, `node web/test/reasoning.test.cjs`, `node web/test/json.test.cjs` and `node web/test/design.test.cjs`.
+Run the checks with `node web/test/markdown.test.cjs`, `node web/test/reasoning.test.cjs`, `node web/test/json.test.cjs` and `node web/test/design.test.cjs`, and `node --test web/test/compaction.test.cjs`.
 
 ## How it works
 

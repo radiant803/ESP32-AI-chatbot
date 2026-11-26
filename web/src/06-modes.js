@@ -61,15 +61,24 @@ You may use up to ${this.MAX_STEPS} steps; use them to verify facts, fix mistake
   },
   async run(chat, node, userNode, signal) {
     const cfg = deepConfig(), dl = deadline(signal, cfg.ms), sig = dl.signal, started = Date.now();
-    const hist = pathMessages(chat, node.id), task = hist.pop() || { role: "user", text: userNode.text, images: [] };
-    const context = hist.slice(-4).map((m) => `${m.role}: ${m.text.slice(0, 350)}`).join("\n").slice(0, 1400);
+    const hist = pathMessages(chat, node.id);
+    hist.pop();
+    const task = nodeMessage(userNode);
+    const prior = compactionBase(chat, pathBefore(chat, userNode.id));
+    const context = [prior ? historicalSummary(prior.text.slice(0, 700)) : "",
+      hist.slice(-4).map((m) => `${m.role}: ${m.text.slice(0, 350)}`).join("\n")].filter(Boolean).join("\n").slice(0, 1400);
     const work = [task];  // the task stays pinned as the first message even when a small device has to drop older steps
     node.artifacts = node.artifacts || [];
     try {
       for (let n = 1; n <= this.MAX_STEPS; n++) {
         const think = addStep(chat, node, `Step ${n}: thinking`);
         const stepEffort = chat.effortTouched || n === 1 ? undefined : (cfg.effort === "high" ? "medium" : undefined);  // deep thinking for the plan; tool-choice steps need less
-        const req = fitToLimit(chat.provider, baseRequest(chat, this.system(context), { messages: work.slice(), maxTokens: cfg.tokens, smallRecords: Dev.smallDevice(), ...(stepEffort ? { effort: stepEffort } : {}) }), { pinFirst: true });
+        const limitContext = (history) => baseRequest(chat, "", {
+          system: this.system(history), messages: work, maxTokens: cfg.tokens, smallRecords: Dev.smallDevice(),
+          ...(stepEffort ? { effort: stepEffort } : {}),
+        });
+        const recent = fitExcerpt(context, (value) => fitsRequest(chat.provider, { ...limitContext(value), messages: [task] }));
+        const req = fitToLimit(chat.provider, limitContext(recent), { pinFirst: true, shortenToolResult: work.length > 1 });
         const raw = await completeLive(chat, node, req, sig, think);
         let act; try { act = extractJson(raw); } catch (_) { endStep(chat, node, think, "done", "Answered directly"); node.text = raw; return; }
         const name = String(act.action || "final"), args = act.args || act;  // some models put the arguments at the top level
